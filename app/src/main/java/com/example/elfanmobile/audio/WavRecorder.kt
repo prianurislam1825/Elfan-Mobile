@@ -53,9 +53,43 @@ class WavRecorder(private val context: Context) {
         private const val WAV_HEADER_SIZE = 44
     }
 
+    /**
+     * Diagnostic stats collected from the last recording session.
+     * Exposed so the UI can display them without ADB/Logcat.
+     */
+    data class AudioDiagnostic(
+        val totalBytesRead: Long,
+        val totalSamples: Long,
+        val nonZeroSamples: Long,
+        val peak: Int,        // max absolute amplitude (0–32767)
+        val minSample: Int,   // most negative signed sample
+        val maxSample: Int,   // most positive signed sample
+        val allZero: Boolean, // true = entire recording is silence
+        val readCount: Int,   // how many times AudioRecord.read() was called
+        val durationSeconds: Float
+    ) {
+        /** Human-readable summary for display in UI */
+        fun toDisplayString(): String = buildString {
+            appendLine("═══ AUDIO DIAGNOSTIC ═══")
+            appendLine("totalBytes   : $totalBytesRead B")
+            appendLine("readCount    : $readCount")
+            appendLine("totalSamples : $totalSamples")
+            appendLine("nonZero      : $nonZeroSamples")
+            appendLine("peak         : $peak")
+            appendLine("min          : $minSample")
+            appendLine("max          : $maxSample")
+            appendLine("allZero      : $allZero")
+            append(    "duration     : ${"%.2f".format(durationSeconds)} s")
+        }
+    }
+
     private var audioRecord: AudioRecord? = null
     @Volatile private var isRecording = false
     private var outputFile: File? = null
+
+    /** Diagnostic from the most recent recording. Null if no recording has finished. */
+    var lastDiagnostic: AudioDiagnostic? = null
+        private set
 
     /** Duration of the last recording in seconds. */
     var lastRecordingDurationSeconds: Float = 0f
@@ -157,7 +191,13 @@ class WavRecorder(private val context: Context) {
                 val buffer = ByteArray(bufferSize)
                 var totalBytesWritten = 0L
                 var readCount = 0
-                var zeroChunkCount = 0
+
+                // ── Accumulated stats across entire recording ─────────────────
+                var accumPeak = 0
+                var accumMin = Int.MAX_VALUE
+                var accumMax = Int.MIN_VALUE
+                var accumTotalSamples = 0L
+                var accumNonZero = 0L
 
                 // ── 7. Recording loop ────────────────────────────────────────
                 while (isActive && isRecording) {
@@ -169,75 +209,67 @@ class WavRecorder(private val context: Context) {
                             totalBytesWritten += bytesRead
                             readCount++
 
-                            // ── 8. Diagnostic every 10 reads ─────────────────
+                            // Scan every PCM sample in this chunk
+                            var i = 0
+                            while (i + 1 < bytesRead) {
+                                val raw = (buffer[i + 1].toInt() shl 8) or
+                                        (buffer[i].toInt() and 0xFF)
+                                val signed = if (raw >= 0x8000) raw - 0x10000 else raw
+                                val abs = kotlin.math.abs(signed)
+
+                                if (abs > accumPeak)    accumPeak = abs
+                                if (signed < accumMin)  accumMin = signed
+                                if (signed > accumMax)  accumMax = signed
+                                if (signed != 0)        accumNonZero++
+
+                                accumTotalSamples++
+                                i += 2
+                            }
+
+                            // Periodic log (every 10 reads) for anyone with Logcat
                             if (readCount % 10 == 0) {
-                                var peak = 0
-                                var minSample = Int.MAX_VALUE
-                                var maxSample = Int.MIN_VALUE
-                                var allZero = true
-                                var nonZeroCount = 0
-
-                                var i = 0
-                                while (i + 1 < bytesRead) {
-                                    // Little-endian PCM16 → signed int
-                                    val sample = (buffer[i + 1].toInt() shl 8) or
-                                            (buffer[i].toInt() and 0xFF)
-                                    // Convert to signed
-                                    val signedSample = if (sample >= 0x8000) sample - 0x10000 else sample
-
-                                    val abs = kotlin.math.abs(signedSample)
-                                    if (abs > peak) peak = abs
-                                    if (signedSample < minSample) minSample = signedSample
-                                    if (signedSample > maxSample) maxSample = signedSample
-                                    if (signedSample != 0) {
-                                        allZero = false
-                                        nonZeroCount++
-                                    }
-                                    i += 2
-                                }
-
-                                if (allZero) zeroChunkCount++
-
                                 Log.d(TAG,
                                     "🎙️ AUDIO DEBUG #$readCount | " +
                                     "bytes=$bytesRead | " +
-                                    "peak=$peak | " +
-                                    "min=$minSample | " +
-                                    "max=$maxSample | " +
-                                    "allZero=$allZero | " +
-                                    "nonZero=$nonZeroCount | " +
-                                    "zeroChunks=$zeroChunkCount | " +
+                                    "runningPeak=$accumPeak | " +
+                                    "allZeroSoFar=${accumNonZero == 0L} | " +
                                     "totalWritten=${totalBytesWritten}B"
                                 )
-
-                                if (allZero) {
-                                    Log.w(TAG, "⚠️ WARNING: chunk #$readCount is ALL ZEROS — " +
-                                            "microphone may be blocked or silent!")
-                                }
                             }
                         }
-                        bytesRead == AudioRecord.ERROR_INVALID_OPERATION -> {
-                            Log.e(TAG, "❌ record.read() ERROR_INVALID_OPERATION — " +
-                                    "AudioRecord not recording yet?")
-                        }
-                        bytesRead == AudioRecord.ERROR_BAD_VALUE -> {
-                            Log.e(TAG, "❌ record.read() ERROR_BAD_VALUE")
-                        }
-                        bytesRead == AudioRecord.ERROR -> {
-                            Log.e(TAG, "❌ record.read() ERROR")
-                        }
-                        bytesRead == 0 -> {
-                            Log.w(TAG, "⚠️ record.read() returned 0 bytes")
-                        }
-                        else -> {
-                            Log.e(TAG, "❌ record.read() unexpected return: $bytesRead")
-                        }
+                        bytesRead == AudioRecord.ERROR_INVALID_OPERATION ->
+                            Log.e(TAG, "❌ read() ERROR_INVALID_OPERATION")
+                        bytesRead == AudioRecord.ERROR_BAD_VALUE ->
+                            Log.e(TAG, "❌ read() ERROR_BAD_VALUE")
+                        bytesRead == AudioRecord.ERROR ->
+                            Log.e(TAG, "❌ read() ERROR")
+                        bytesRead == 0 ->
+                            Log.w(TAG, "⚠️ read() returned 0 bytes")
+                        else ->
+                            Log.e(TAG, "❌ read() unexpected: $bytesRead")
                     }
                 }
 
                 fos.flush()
-                Log.d(TAG, "Recording loop ended. totalBytesWritten=$totalBytesWritten")
+
+                // ── Store final accumulated diagnostic ───────────────────────
+                val durSec = totalBytesWritten.toFloat() / BYTE_RATE
+                val allZero = accumNonZero == 0L
+                lastDiagnostic = AudioDiagnostic(
+                    totalBytesRead   = totalBytesWritten,
+                    totalSamples     = accumTotalSamples,
+                    nonZeroSamples   = accumNonZero,
+                    peak             = accumPeak,
+                    minSample        = if (accumMin == Int.MAX_VALUE) 0 else accumMin,
+                    maxSample        = if (accumMax == Int.MIN_VALUE) 0 else accumMax,
+                    allZero          = allZero,
+                    readCount        = readCount,
+                    durationSeconds  = durSec
+                )
+
+                Log.d(TAG, "Recording ended.\n${lastDiagnostic!!.toDisplayString()}")
             }
+
 
         } catch (e: Exception) {
             Log.e(TAG, "Recording error: ${e.message}", e)

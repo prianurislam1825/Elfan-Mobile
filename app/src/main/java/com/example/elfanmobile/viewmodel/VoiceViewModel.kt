@@ -52,6 +52,9 @@ class VoiceViewModel(
     private val _lastWavFile = MutableStateFlow<File?>(null)
     val lastWavFile: StateFlow<File?> = _lastWavFile.asStateFlow()
 
+    private val _audioDiagnostic = MutableStateFlow<com.example.elfanmobile.audio.WavRecorder.AudioDiagnostic?>(null)
+    val audioDiagnostic: StateFlow<com.example.elfanmobile.audio.WavRecorder.AudioDiagnostic?> = _audioDiagnostic.asStateFlow()
+
     // ── Settings ──────────────────────────────────────────────────────────────
 
     val raspberryPiUrl = settingsRepository.raspberryPiUrl
@@ -76,6 +79,9 @@ class VoiceViewModel(
             _recordingDuration.value = 0f
 
             val file = wavRecorder.startRecording()  // suspends until stopRecording() called
+
+            // Capture diagnostic immediately after recording ends
+            _audioDiagnostic.value = wavRecorder.lastDiagnostic
 
             if (file != null && file.length() > 44) {
                 _recordingDuration.value = wavRecorder.lastRecordingDurationSeconds

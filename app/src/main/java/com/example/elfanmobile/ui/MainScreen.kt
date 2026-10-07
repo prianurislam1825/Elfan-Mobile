@@ -6,6 +6,7 @@ import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
@@ -78,6 +79,7 @@ fun MainScreen(
     val duration by viewModel.recordingDuration.collectAsState()
     val baseUrl by viewModel.raspberryPiUrl.collectAsState(initial = "")
     val debugMode by viewModel.debugMode.collectAsState(initial = false)
+    val audioDiagnostic by viewModel.audioDiagnostic.collectAsState()
 
     Scaffold(
         topBar = {
@@ -155,6 +157,12 @@ fun MainScreen(
             ResultCard(state = state)
 
             Spacer(modifier = Modifier.height(16.dp))
+
+            // ── Diagnostic card (Always visible right now for debugging) ─────
+            if (audioDiagnostic != null) {
+                AudioDiagnosticCard(diagnostic = audioDiagnostic!!)
+                Spacer(modifier = Modifier.height(16.dp))
+            }
 
             // ── Debug card ───────────────────────────────────────────────────
             if (debugMode) {
@@ -475,6 +483,59 @@ private fun DebugCard(state: VoiceViewModel.RecordingState, duration: Float) {
                 style = MaterialTheme.typography.bodySmall,
                 fontFamily = FontFamily.Monospace,
                 color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.8f),
+                lineHeight = 18.sp
+            )
+        }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Audio Diagnostic Card
+// ─────────────────────────────────────────────────────────────────────────────
+
+@Composable
+private fun AudioDiagnosticCard(diagnostic: com.example.elfanmobile.audio.WavRecorder.AudioDiagnostic) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(12.dp),
+        colors = CardDefaults.cardColors(
+            containerColor = Color(0xFFE8F5E9) // Light green for visibility
+        ),
+        border = BorderStroke(1.dp, Color(0xFF4CAF50))
+    ) {
+        Column(modifier = Modifier.padding(16.dp)) {
+            Text(
+                text = "AUDIO DIAGNOSTIC",
+                style = MaterialTheme.typography.labelSmall,
+                fontWeight = FontWeight.Bold,
+                color = Color(0xFF2E7D32),
+                letterSpacing = 2.sp
+            )
+            Spacer(modifier = Modifier.height(8.dp))
+
+            val warningText = if (diagnostic.allZero) {
+                "\n⚠️ ALL PCM SAMPLES ARE ZERO (SILENCE)!\nMicrophone might be blocked by OS."
+            } else {
+                "\n✅ Audio contains non-zero signal."
+            }
+
+            val text = buildString {
+                append("Bytes Read  : ${diagnostic.totalBytesRead} B\n")
+                append("Read Count  : ${diagnostic.readCount} iterations\n")
+                append("Peak Amp    : ${diagnostic.peak} (Max 32767)\n")
+                append("Min Sample  : ${diagnostic.minSample}\n")
+                append("Max Sample  : ${diagnostic.maxSample}\n")
+                append("Total Smpls : ${diagnostic.totalSamples}\n")
+                append("Non-zero    : ${diagnostic.nonZeroSamples}\n")
+                append("All Zero?   : ${diagnostic.allZero}")
+                append(warningText)
+            }
+
+            Text(
+                text = text,
+                style = MaterialTheme.typography.bodySmall,
+                fontFamily = FontFamily.Monospace,
+                color = Color(0xFF1B5E20),
                 lineHeight = 18.sp
             )
         }
