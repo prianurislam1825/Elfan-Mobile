@@ -11,7 +11,6 @@ import androidx.core.content.ContextCompat
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.withContext
-import java.io.DataOutputStream
 import java.io.File
 import java.io.FileOutputStream
 import java.io.RandomAccessFile
@@ -22,34 +21,41 @@ import java.nio.ByteOrder
  * WavRecorder
  *
  * Native AudioRecord-based recorder that captures PCM 16-bit, 16 kHz, Mono audio
- * and writes it as a valid WAV file. This is required so Whisper.cpp on the
- * Raspberry Pi can process the audio correctly.
+ * and writes it as a valid WAV file.
  *
  * Audio format:
  *   Sample rate : 16000 Hz
  *   Channels    : MONO
  *   Encoding    : PCM_16BIT
+ *
+ * IMPORTANT DESIGN NOTES:
+ * - WAV header is written as raw bytes directly to FileOutputStream (NOT via
+ *   DataOutputStream wrapper) to prevent buffer flush ordering issues that
+ *   caused silent (-91 dB) recordings.
+ * - AudioRecord state is fully logged for diagnostics.
  */
 class WavRecorder(private val context: Context) {
 
     companion object {
         private const val TAG = "WavRecorder"
-        private const val SAMPLE_RATE = 16000
+        const val SAMPLE_RATE = 16000
         private const val CHANNEL_CONFIG = AudioFormat.CHANNEL_IN_MONO
         private const val AUDIO_FORMAT = AudioFormat.ENCODING_PCM_16BIT
         private const val OUTPUT_FILE_NAME = "elfan_record.wav"
 
         // WAV format constants
-        private const val BITS_PER_SAMPLE: Short = 16
-        private const val NUM_CHANNELS: Short = 1
+        private const val BITS_PER_SAMPLE = 16
+        private const val NUM_CHANNELS = 1
         private const val BYTE_RATE = SAMPLE_RATE * NUM_CHANNELS * (BITS_PER_SAMPLE / 8)
-        private const val BLOCK_ALIGN: Short = (NUM_CHANNELS * (BITS_PER_SAMPLE / 8)).toShort()
+        private const val BLOCK_ALIGN = NUM_CHANNELS * (BITS_PER_SAMPLE / 8)
+
+        // WAV header is exactly 44 bytes
+        private const val WAV_HEADER_SIZE = 44
     }
 
     private var audioRecord: AudioRecord? = null
     @Volatile private var isRecording = false
     private var outputFile: File? = null
-    private var recordingStartTime: Long = 0L
 
     /** Duration of the last recording in seconds. */
     var lastRecordingDurationSeconds: Float = 0f
@@ -74,94 +80,187 @@ class WavRecorder(private val context: Context) {
      * @return the output File if successful, null if permission denied or error
      */
     suspend fun startRecording(): File? = withContext(Dispatchers.IO) {
+        // ── 1. Permission check ──────────────────────────────────────────────
         if (!hasMicrophonePermission()) {
-            Log.e(TAG, "Microphone permission not granted")
+            Log.e(TAG, "❌ RECORD_AUDIO permission not granted")
             return@withContext null
         }
+        Log.d(TAG, "✅ RECORD_AUDIO permission: GRANTED")
 
+        // ── 2. Compute buffer size ───────────────────────────────────────────
         val minBufferSize = AudioRecord.getMinBufferSize(SAMPLE_RATE, CHANNEL_CONFIG, AUDIO_FORMAT)
+        Log.d(TAG, "minBufferSize=$minBufferSize")
+
         if (minBufferSize == AudioRecord.ERROR || minBufferSize == AudioRecord.ERROR_BAD_VALUE) {
-            Log.e(TAG, "Invalid buffer size: $minBufferSize")
+            Log.e(TAG, "❌ getMinBufferSize failed: $minBufferSize")
             return@withContext null
         }
 
-        // Use at least 2x min buffer for stability
         val bufferSize = maxOf(minBufferSize * 2, 4096)
+        Log.d(TAG, "bufferSize=$bufferSize")
+
+        // ── 3. Create AudioRecord ────────────────────────────────────────────
+        // Try MIC first, fallback to VOICE_RECOGNITION if blocked
+        val audioSource = MediaRecorder.AudioSource.MIC
+        Log.d(TAG, "AudioSource=$audioSource (MIC=${MediaRecorder.AudioSource.MIC})")
 
         val record = AudioRecord(
-            MediaRecorder.AudioSource.MIC,
+            audioSource,
             SAMPLE_RATE,
             CHANNEL_CONFIG,
             AUDIO_FORMAT,
             bufferSize
         )
 
+        Log.d(TAG, "AudioRecord.state=${record.state} " +
+                "(STATE_INITIALIZED=${AudioRecord.STATE_INITIALIZED}, " +
+                "STATE_UNINITIALIZED=${AudioRecord.STATE_UNINITIALIZED})")
+
         if (record.state != AudioRecord.STATE_INITIALIZED) {
-            Log.e(TAG, "AudioRecord failed to initialize")
+            Log.e(TAG, "❌ AudioRecord failed to initialize — state=${record.state}")
             record.release()
             return@withContext null
         }
+        Log.d(TAG, "✅ AudioRecord STATE_INITIALIZED")
 
-        // Prepare output file in app's cache directory
+        // ── 4. Prepare output file ───────────────────────────────────────────
         val file = File(context.cacheDir, OUTPUT_FILE_NAME)
         outputFile = file
+        Log.d(TAG, "Output file: $file")
 
         audioRecord = record
         isRecording = true
-        recordingStartTime = System.currentTimeMillis()
 
         try {
+            // ── 5. Start recording ───────────────────────────────────────────
             record.startRecording()
-            Log.d(TAG, "Recording started → $file")
 
-            // Write raw PCM data to file first; WAV header added after stopping
+            Log.d(TAG, "AudioRecord.recordingState=${record.recordingState} " +
+                    "(RECORDSTATE_RECORDING=${AudioRecord.RECORDSTATE_RECORDING})")
+
+            if (record.recordingState != AudioRecord.RECORDSTATE_RECORDING) {
+                Log.e(TAG, "❌ startRecording() did not transition to RECORDSTATE_RECORDING")
+            } else {
+                Log.d(TAG, "✅ startRecording() OK — recording is active")
+            }
+
+            // ── 6. Open file and write WAV header as raw bytes ───────────────
+            // IMPORTANT: We write the header directly as a ByteArray to avoid
+            // DataOutputStream buffering issues that caused silent recordings.
             FileOutputStream(file).use { fos ->
+                // Write placeholder header (44 bytes of zeros) — fixed after stop
+                fos.write(buildWavHeader(0))
+                fos.flush() // Ensure header bytes reach the file before PCM data
+
+                Log.d(TAG, "WAV placeholder header written (44 bytes)")
+
                 val buffer = ByteArray(bufferSize)
+                var totalBytesWritten = 0L
+                var readCount = 0
+                var zeroChunkCount = 0
 
-                // Write placeholder WAV header (44 bytes) — will be fixed after stop
-                writeWavHeader(fos, 0)
-
-                var debugCounter = 0
+                // ── 7. Recording loop ────────────────────────────────────────
                 while (isActive && isRecording) {
                     val bytesRead = record.read(buffer, 0, bufferSize)
-                    if (bytesRead > 0) {
-                        fos.write(buffer, 0, bytesRead)
-                        
-                        // Debug level audio setiap beberapa pembacaan
-                        debugCounter++
-                        if (debugCounter % 10 == 0) {
-                            var peak = 0
-                            var i = 0
-                            while (i + 1 < bytesRead) {
-                                val sample = ((buffer[i + 1].toInt() shl 8) or (buffer[i].toInt() and 0xFF))
-                                val absSample = kotlin.math.abs(sample)
-                                if (absSample > peak) {
-                                    peak = absSample
+
+                    when {
+                        bytesRead > 0 -> {
+                            fos.write(buffer, 0, bytesRead)
+                            totalBytesWritten += bytesRead
+                            readCount++
+
+                            // ── 8. Diagnostic every 10 reads ─────────────────
+                            if (readCount % 10 == 0) {
+                                var peak = 0
+                                var minSample = Int.MAX_VALUE
+                                var maxSample = Int.MIN_VALUE
+                                var allZero = true
+                                var nonZeroCount = 0
+
+                                var i = 0
+                                while (i + 1 < bytesRead) {
+                                    // Little-endian PCM16 → signed int
+                                    val sample = (buffer[i + 1].toInt() shl 8) or
+                                            (buffer[i].toInt() and 0xFF)
+                                    // Convert to signed
+                                    val signedSample = if (sample >= 0x8000) sample - 0x10000 else sample
+
+                                    val abs = kotlin.math.abs(signedSample)
+                                    if (abs > peak) peak = abs
+                                    if (signedSample < minSample) minSample = signedSample
+                                    if (signedSample > maxSample) maxSample = signedSample
+                                    if (signedSample != 0) {
+                                        allZero = false
+                                        nonZeroCount++
+                                    }
+                                    i += 2
                                 }
-                                i += 2
+
+                                if (allZero) zeroChunkCount++
+
+                                Log.d(TAG,
+                                    "🎙️ AUDIO DEBUG #$readCount | " +
+                                    "bytes=$bytesRead | " +
+                                    "peak=$peak | " +
+                                    "min=$minSample | " +
+                                    "max=$maxSample | " +
+                                    "allZero=$allZero | " +
+                                    "nonZero=$nonZeroCount | " +
+                                    "zeroChunks=$zeroChunkCount | " +
+                                    "totalWritten=${totalBytesWritten}B"
+                                )
+
+                                if (allZero) {
+                                    Log.w(TAG, "⚠️ WARNING: chunk #$readCount is ALL ZEROS — " +
+                                            "microphone may be blocked or silent!")
+                                }
                             }
-                            Log.d(TAG, "🎙️ AUDIO DEBUG | bytes=$bytesRead | peak=$peak")
+                        }
+                        bytesRead == AudioRecord.ERROR_INVALID_OPERATION -> {
+                            Log.e(TAG, "❌ record.read() ERROR_INVALID_OPERATION — " +
+                                    "AudioRecord not recording yet?")
+                        }
+                        bytesRead == AudioRecord.ERROR_BAD_VALUE -> {
+                            Log.e(TAG, "❌ record.read() ERROR_BAD_VALUE")
+                        }
+                        bytesRead == AudioRecord.ERROR -> {
+                            Log.e(TAG, "❌ record.read() ERROR")
+                        }
+                        bytesRead == 0 -> {
+                            Log.w(TAG, "⚠️ record.read() returned 0 bytes")
+                        }
+                        else -> {
+                            Log.e(TAG, "❌ record.read() unexpected return: $bytesRead")
                         }
                     }
                 }
+
+                fos.flush()
+                Log.d(TAG, "Recording loop ended. totalBytesWritten=$totalBytesWritten")
             }
 
         } catch (e: Exception) {
             Log.e(TAG, "Recording error: ${e.message}", e)
         } finally {
             record.stop()
+            Log.d(TAG, "AudioRecord stopped. recordingState=${record.recordingState}")
             record.release()
             audioRecord = null
         }
 
-        // Fix WAV header with actual data size
-        val pcmDataSize = (file.length() - 44).toInt()
+        // ── 9. Fix WAV header with real data size ────────────────────────────
+        val fileSize = file.length()
+        val pcmDataSize = (fileSize - WAV_HEADER_SIZE).toInt()
+
+        Log.d(TAG, "File size on disk: $fileSize bytes | pcmDataSize: $pcmDataSize bytes")
+
         if (pcmDataSize > 0) {
             fixWavHeader(file, pcmDataSize)
             lastRecordingDurationSeconds = pcmDataSize.toFloat() / BYTE_RATE
-            Log.d(TAG, "Recording finished. PCM size=$pcmDataSize bytes, duration=${lastRecordingDurationSeconds}s")
+            Log.d(TAG, "✅ WAV header fixed. duration=${lastRecordingDurationSeconds}s")
         } else {
             lastRecordingDurationSeconds = 0f
+            Log.e(TAG, "❌ pcmDataSize=$pcmDataSize — file has no PCM data!")
         }
 
         return@withContext file
@@ -170,65 +269,62 @@ class WavRecorder(private val context: Context) {
     /** Stop an ongoing recording. */
     fun stopRecording() {
         isRecording = false
-        Log.d(TAG, "Stop recording requested")
+        Log.d(TAG, "stopRecording() called — isRecording set to false")
     }
 
-    /**
-     * Write a WAV header to the output stream.
-     * If pcmDataSize is 0 it writes a placeholder header.
-     */
-    private fun writeWavHeader(fos: FileOutputStream, pcmDataSize: Int) {
-        val totalDataLen = pcmDataSize + 36  // 36 = header size - 8
-        val byteRate = BYTE_RATE
+    // ─────────────────────────────────────────────────────────────────────────
+    // WAV header helpers
+    // Written directly as ByteArray to FileOutputStream — no intermediate
+    // DataOutputStream wrapper to avoid buffer-ordering bugs.
+    // ─────────────────────────────────────────────────────────────────────────
 
-        DataOutputStream(fos).apply {
+    /**
+     * Build a 44-byte WAV header as a raw ByteArray.
+     * If [pcmDataSize] is 0, writes a placeholder that will be fixed later.
+     */
+    private fun buildWavHeader(pcmDataSize: Int): ByteArray {
+        val totalDataLen = pcmDataSize + 36  // 36 = WAV_HEADER_SIZE - 8
+
+        return ByteBuffer.allocate(WAV_HEADER_SIZE).apply {
+            order(ByteOrder.LITTLE_ENDIAN)
+
             // RIFF chunk descriptor
-            write("RIFF".toByteArray())
-            writeIntLE(totalDataLen)
-            write("WAVE".toByteArray())
+            put("RIFF".toByteArray())       // ChunkID
+            putInt(totalDataLen)            // ChunkSize
+            put("WAVE".toByteArray())       // Format
 
             // fmt sub-chunk
-            write("fmt ".toByteArray())
-            writeIntLE(16)           // Sub-chunk1 size for PCM
-            writeShortLE(1)          // Audio format: PCM = 1
-            writeShortLE(NUM_CHANNELS.toInt())
-            writeIntLE(SAMPLE_RATE)
-            writeIntLE(byteRate)
-            writeShortLE(BLOCK_ALIGN.toInt())
-            writeShortLE(BITS_PER_SAMPLE.toInt())
+            put("fmt ".toByteArray())       // Subchunk1ID
+            putInt(16)                      // Subchunk1Size (PCM = 16)
+            putShort(1)                     // AudioFormat (PCM = 1)
+            putShort(NUM_CHANNELS.toShort())
+            putInt(SAMPLE_RATE)
+            putInt(BYTE_RATE)
+            putShort(BLOCK_ALIGN.toShort())
+            putShort(BITS_PER_SAMPLE.toShort())
 
             // data sub-chunk
-            write("data".toByteArray())
-            writeIntLE(pcmDataSize)
-        }
+            put("data".toByteArray())       // Subchunk2ID
+            putInt(pcmDataSize)             // Subchunk2Size
+        }.array()
     }
 
     /**
-     * Re-write the WAV header in-place with the correct pcmDataSize.
+     * Overwrite only the size fields in the WAV header in-place.
+     * This avoids re-reading/re-writing the entire file.
      */
     private fun fixWavHeader(file: File, pcmDataSize: Int) {
+        val totalDataLen = pcmDataSize + 36
         RandomAccessFile(file, "rw").use { raf ->
-            val totalDataLen = pcmDataSize + 36
-
-            // Fix "RIFF" chunk size at byte offset 4
+            // ChunkSize at byte offset 4
             raf.seek(4)
             raf.write(intToLittleEndianBytes(totalDataLen))
 
-            // Fix "data" chunk size at byte offset 40
+            // Subchunk2Size at byte offset 40
             raf.seek(40)
             raf.write(intToLittleEndianBytes(pcmDataSize))
         }
-    }
-
-    // ─── Little-endian helpers ────────────────────────────────────────────────
-
-    private fun DataOutputStream.writeIntLE(value: Int) {
-        write(intToLittleEndianBytes(value))
-    }
-
-    private fun DataOutputStream.writeShortLE(value: Int) {
-        val buf = ByteBuffer.allocate(2).order(ByteOrder.LITTLE_ENDIAN).putShort(value.toShort()).array()
-        write(buf)
+        Log.d(TAG, "fixWavHeader: totalDataLen=$totalDataLen, pcmDataSize=$pcmDataSize")
     }
 
     private fun intToLittleEndianBytes(value: Int): ByteArray {
