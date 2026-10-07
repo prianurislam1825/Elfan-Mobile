@@ -121,10 +121,27 @@ class WavRecorder(private val context: Context) {
                 // Write placeholder WAV header (44 bytes) — will be fixed after stop
                 writeWavHeader(fos, 0)
 
+                var debugCounter = 0
                 while (isActive && isRecording) {
                     val bytesRead = record.read(buffer, 0, bufferSize)
                     if (bytesRead > 0) {
                         fos.write(buffer, 0, bytesRead)
+                        
+                        // Debug level audio setiap beberapa pembacaan
+                        debugCounter++
+                        if (debugCounter % 10 == 0) {
+                            var peak = 0
+                            var i = 0
+                            while (i + 1 < bytesRead) {
+                                val sample = ((buffer[i + 1].toInt() shl 8) or (buffer[i].toInt() and 0xFF))
+                                val absSample = kotlin.math.abs(sample)
+                                if (absSample > peak) {
+                                    peak = absSample
+                                }
+                                i += 2
+                            }
+                            Log.d(TAG, "🎙️ AUDIO DEBUG | bytes=$bytesRead | peak=$peak")
+                        }
                     }
                 }
             }
