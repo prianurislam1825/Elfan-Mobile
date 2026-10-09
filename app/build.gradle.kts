@@ -98,6 +98,6 @@ dependencies {
   // Coroutines Android
   implementation(libs.kotlinx.coroutines.android)
 
-  // Picovoice Porcupine (Wake Word)
-  implementation(libs.porcupine.android)
+  // Vosk Android Prototype
+  implementation("com.alphacephei:vosk-android:0.3.47")
 }
