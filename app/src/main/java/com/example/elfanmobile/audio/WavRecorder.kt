@@ -95,6 +95,12 @@ class WavRecorder(private val context: Context) {
     var lastRecordingDurationSeconds: Float = 0f
         private set
 
+    // ── VAD Configuration (End-of-Speech) ────────────────────────────────────
+    var vadEnabled: Boolean = true
+    var silenceRmsThreshold: Int = 1000 // Configurable threshold for silence
+    var maxSilenceDurationMs: Long = 1500L // Stop after this much consecutive silence
+    var minRecordingDurationMs: Long = 1000L // Don't stop before this duration
+
     /** The output WAV file from the last recording. */
     val wavFile: File?
         get() = outputFile
@@ -199,6 +205,11 @@ class WavRecorder(private val context: Context) {
                 var accumTotalSamples = 0L
                 var accumNonZero = 0L
 
+                // ── VAD State ─────────────────────────────────────────────────
+                var consecutiveSilenceSamples = 0L
+                val silenceSamplesThreshold = (SAMPLE_RATE.toLong() * maxSilenceDurationMs) / 1000L
+                val minSamplesToRecord = (SAMPLE_RATE.toLong() * minRecordingDurationMs) / 1000L
+
                 // ── 7. Recording loop ────────────────────────────────────────
                 while (isActive && isRecording) {
                     val bytesRead = record.read(buffer, 0, bufferSize)
@@ -208,6 +219,9 @@ class WavRecorder(private val context: Context) {
                             fos.write(buffer, 0, bytesRead)
                             totalBytesWritten += bytesRead
                             readCount++
+
+                            var chunkSumSquares = 0.0
+                            var chunkSampleCount = 0
 
                             // Scan every PCM sample in this chunk
                             var i = 0
@@ -222,17 +236,39 @@ class WavRecorder(private val context: Context) {
                                 if (signed > accumMax)  accumMax = signed
                                 if (signed != 0)        accumNonZero++
 
+                                chunkSumSquares += signed.toDouble() * signed.toDouble()
+                                chunkSampleCount++
                                 accumTotalSamples++
                                 i += 2
+                            }
+
+                            // Calculate RMS for this chunk
+                            val chunkRms = if (chunkSampleCount > 0) {
+                                kotlin.math.sqrt(chunkSumSquares / chunkSampleCount).toInt()
+                            } else {
+                                0
+                            }
+
+                            // ── 8. VAD Logic (End of speech detection) ───────
+                            if (vadEnabled) {
+                                if (chunkRms < silenceRmsThreshold) {
+                                    consecutiveSilenceSamples += chunkSampleCount
+                                } else {
+                                    consecutiveSilenceSamples = 0 // Reset silence counter if user speaks
+                                }
+
+                                if (accumTotalSamples > minSamplesToRecord && consecutiveSilenceSamples >= silenceSamplesThreshold) {
+                                    Log.d(TAG, "🛑 VAD: End of speech detected. RMS=$chunkRms < $silenceRmsThreshold for ${maxSilenceDurationMs}ms.")
+                                    isRecording = false // Automatically stop recording
+                                }
                             }
 
                             // Periodic log (every 10 reads) for anyone with Logcat
                             if (readCount % 10 == 0) {
                                 Log.d(TAG,
                                     "🎙️ AUDIO DEBUG #$readCount | " +
-                                    "bytes=$bytesRead | " +
+                                    "bytes=$bytesRead | chunkRms=$chunkRms | " +
                                     "runningPeak=$accumPeak | " +
-                                    "allZeroSoFar=${accumNonZero == 0L} | " +
                                     "totalWritten=${totalBytesWritten}B"
                                 )
                             }
