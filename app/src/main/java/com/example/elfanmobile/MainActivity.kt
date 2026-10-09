@@ -56,6 +56,23 @@ fun ElfanApp(activity: MainActivity) {
     var showSettings by remember { mutableStateOf(false) }
     var showPermissionDialog by remember { mutableStateOf(false) }
 
+    // Start/Stop WakeWordService based on settings
+    val wakeWordEnabled by viewModel.wakeWordEnabled.collectAsState(initial = false)
+    androidx.compose.runtime.LaunchedEffect(wakeWordEnabled) {
+        val intent = android.content.Intent(activity, com.example.elfanmobile.audio.WakeWordService::class.java)
+        if (wakeWordEnabled) {
+            intent.action = com.example.elfanmobile.audio.WakeWordService.ACTION_START
+            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
+                activity.startForegroundService(intent)
+            } else {
+                activity.startService(intent)
+            }
+        } else {
+            intent.action = com.example.elfanmobile.audio.WakeWordService.ACTION_STOP
+            activity.startService(intent)
+        }
+    }
+
     // Microphone permission launcher
     val micPermissionLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestPermission()

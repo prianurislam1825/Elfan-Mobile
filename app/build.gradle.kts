@@ -97,4 +97,7 @@ dependencies {
 
   // Coroutines Android
   implementation(libs.kotlinx.coroutines.android)
+
+  // Picovoice Porcupine (Wake Word)
+  implementation(libs.porcupine.android)
 }

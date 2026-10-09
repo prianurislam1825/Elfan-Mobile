@@ -59,6 +59,8 @@ class VoiceViewModel(
 
     val raspberryPiUrl = settingsRepository.raspberryPiUrl
     val debugMode = settingsRepository.debugMode
+    val wakeWordEnabled = settingsRepository.wakeWordEnabled
+    val porcupineAccessKey = settingsRepository.porcupineAccessKey
 
     // ── Internals ─────────────────────────────────────────────────────────────
 
@@ -135,6 +137,18 @@ class VoiceViewModel(
     fun setDebugMode(enabled: Boolean) {
         viewModelScope.launch {
             settingsRepository.saveDebugMode(enabled)
+        }
+    }
+
+    fun setWakeWordEnabled(enabled: Boolean) {
+        viewModelScope.launch {
+            settingsRepository.saveWakeWordEnabled(enabled)
+        }
+    }
+
+    fun updatePorcupineAccessKey(key: String) {
+        viewModelScope.launch {
+            settingsRepository.savePorcupineAccessKey(key)
         }
     }
 

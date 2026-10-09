@@ -25,6 +25,8 @@ class SettingsRepository(private val context: Context) {
     companion object {
         val KEY_RASPBERRY_PI_URL = stringPreferencesKey("raspberry_pi_url")
         val KEY_DEBUG_MODE = booleanPreferencesKey("debug_mode")
+        val KEY_WAKE_WORD_ENABLED = booleanPreferencesKey("wake_word_enabled")
+        val KEY_PORCUPINE_ACCESS_KEY = stringPreferencesKey("porcupine_access_key")
 
         const val DEFAULT_RASPBERRY_PI_URL = "http://192.168.20.126:5001"
     }
@@ -39,6 +41,16 @@ class SettingsRepository(private val context: Context) {
         prefs[KEY_DEBUG_MODE] ?: false
     }
 
+    /** Observe wake word enabled state. Emits false if not set. */
+    val wakeWordEnabled: Flow<Boolean> = context.dataStore.data.map { prefs ->
+        prefs[KEY_WAKE_WORD_ENABLED] ?: false
+    }
+
+    /** Observe Porcupine Access Key. Emits empty string if not set. */
+    val porcupineAccessKey: Flow<String> = context.dataStore.data.map { prefs ->
+        prefs[KEY_PORCUPINE_ACCESS_KEY] ?: ""
+    }
+
     /** Save the Raspberry Pi base URL. */
     suspend fun saveRaspberryPiUrl(url: String) {
         context.dataStore.edit { prefs ->
@@ -50,6 +62,20 @@ class SettingsRepository(private val context: Context) {
     suspend fun saveDebugMode(enabled: Boolean) {
         context.dataStore.edit { prefs ->
             prefs[KEY_DEBUG_MODE] = enabled
+        }
+    }
+
+    /** Save the wake word enabled flag. */
+    suspend fun saveWakeWordEnabled(enabled: Boolean) {
+        context.dataStore.edit { prefs ->
+            prefs[KEY_WAKE_WORD_ENABLED] = enabled
+        }
+    }
+
+    /** Save the Porcupine Access Key. */
+    suspend fun savePorcupineAccessKey(key: String) {
+        context.dataStore.edit { prefs ->
+            prefs[KEY_PORCUPINE_ACCESS_KEY] = key.trim()
         }
     }
 }
