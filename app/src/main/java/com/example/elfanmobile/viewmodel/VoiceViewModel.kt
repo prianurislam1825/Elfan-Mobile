@@ -67,6 +67,17 @@ class VoiceViewModel(
     private val wavRecorder = WavRecorder(appContext)
     private var recordingJob: Job? = null
 
+    init {
+        viewModelScope.launch {
+            com.example.elfanmobile.audio.VoiceCommandManager.events.collect { event ->
+                if (event == com.example.elfanmobile.audio.VoiceCommandManager.Event.WAKE_WORD_DETECTED) {
+                    kotlinx.coroutines.delay(300)
+                    startRecording()
+                }
+            }
+        }
+    }
+
     // ── Public API ────────────────────────────────────────────────────────────
 
     /** @return true if microphone permission is currently granted */
@@ -178,6 +189,9 @@ class VoiceViewModel(
                 _recordingState.value = RecordingState.Error(message)
             }
         )
+        
+        // Beri tahu WakeWordService bahwa mikrofon sudah selesai dipakai
+        com.example.elfanmobile.audio.VoiceCommandManager.emitEvent(com.example.elfanmobile.audio.VoiceCommandManager.Event.COMMAND_FINISHED)
     }
 
     // ── Factory ───────────────────────────────────────────────────────────────

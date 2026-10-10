@@ -51,6 +51,7 @@ class WakeWordService : Service(), RecognitionListener {
         super.onCreate()
         Log.d(TAG, "onCreate()")
         createNotificationChannel()
+        listenForCommandFinished()
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -131,13 +132,14 @@ class WakeWordService : Service(), RecognitionListener {
     }
     
     private fun triggerDetectionIndicator(matchedText: String) {
-        showToast("🚨 WAKE WORD TERDETEKSI!")
-        updateNotification("✅ WAKE WORD TERDETEKSI!")
+        showToast("🚨 WAKE WORD TERDETEKSI! Silakan ucapkan perintah...")
+        updateNotification("Merekam perintah Anda...")
         
-        scope.launch {
-            delay(3000)
-            updateNotification("Siap! Ucapkan 'Okay Elfan'")
-        }
+        // 1. Hentikan Vosk agar mikrofon bisa dipakai oleh WavRecorder
+        speechService?.stop()
+        
+        // 2. Beri tahu ViewModel untuk langsung mulai merekam
+        VoiceCommandManager.emitEvent(VoiceCommandManager.Event.WAKE_WORD_DETECTED)
     }
 
     override fun onFinalResult(hypothesis: String?) {}
@@ -145,6 +147,25 @@ class WakeWordService : Service(), RecognitionListener {
         showToast("Error Mic Vosk: ${exception?.message}")
     }
     override fun onTimeout() {}
+
+    private fun listenForCommandFinished() {
+        scope.launch {
+            VoiceCommandManager.events.collect { event ->
+                if (event == VoiceCommandManager.Event.COMMAND_FINISHED) {
+                    // Setelah perintah selesai dan terupload, nyalakan Vosk lagi
+                    showToast("Vosk kembali mendengarkan 'Okay Elfan'...")
+                    updateNotification("Siap! Ucapkan 'Okay Elfan'")
+                    
+                    // Restart listening
+                    try {
+                        speechService?.startListening(this@WakeWordService)
+                    } catch (e: Exception) {
+                        Log.e(TAG, "Gagal menyalakan ulang Vosk", e)
+                    }
+                }
+            }
+        }
+    }
 
     private fun createNotificationChannel() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
