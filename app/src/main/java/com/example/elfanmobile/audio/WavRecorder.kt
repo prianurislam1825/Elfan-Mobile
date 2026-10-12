@@ -95,11 +95,30 @@ class WavRecorder(private val context: Context) {
     var lastRecordingDurationSeconds: Float = 0f
         private set
 
-    // ── VAD Configuration (End-of-Speech) ────────────────────────────────────
+    // ── VAD Configuration (End-of-Speech & Speech Detection) ────────────────
+    enum class StopReason {
+        MANUAL_STOP,
+        END_OF_SPEECH,
+        INITIAL_TIMEOUT,
+        MAX_DURATION,
+        ERROR
+    }
+
     var vadEnabled: Boolean = true
-    var silenceRmsThreshold: Int = 1000 // Configurable threshold for silence
-    var maxSilenceDurationMs: Long = 1500L // Stop after this much consecutive silence
-    var minRecordingDurationMs: Long = 1000L // Don't stop before this duration
+    var speechRmsThreshold: Int = 1200 // RMS di atas ini dianggap sebagai suara/bicara
+    var silenceRmsThreshold: Int = 800  // RMS di bawah ini dianggap hening setelah suara terdeteksi
+    var initialSpeechTimeoutMs: Long = 5000L // Batas waktu menunggu pengguna mulai berbicara (5 detik)
+    var postSpeechSilenceDurationMs: Long = 2500L // Jeda hening setelah berbicara sebelum selesai (2.5 detik)
+    var minSpeechDurationMs: Long = 500L // Minimal durasi suara aktif agar dianggap perintah valid
+    var maxTotalRecordingDurationMs: Long = 20000L // Batas pengaman rekaman maksimal (20 detik)
+
+    /** Menandakan apakah ada suara pengguna yang terdeteksi selama sesi rekaman ini */
+    var hasSpeechDetected: Boolean = false
+        private set
+
+    /** Alasan mengapa rekaman terakhir berhenti */
+    var lastStopReason: StopReason = StopReason.MANUAL_STOP
+        private set
 
     /** The output WAV file from the last recording. */
     val wavFile: File?
@@ -206,9 +225,15 @@ class WavRecorder(private val context: Context) {
                 var accumNonZero = 0L
 
                 // ── VAD State ─────────────────────────────────────────────────
+                hasSpeechDetected = false
+                lastStopReason = StopReason.MANUAL_STOP
+
+                var speechSamplesCount = 0L
                 var consecutiveSilenceSamples = 0L
-                val silenceSamplesThreshold = (SAMPLE_RATE.toLong() * maxSilenceDurationMs) / 1000L
-                val minSamplesToRecord = (SAMPLE_RATE.toLong() * minRecordingDurationMs) / 1000L
+                val initialTimeoutSamples = (SAMPLE_RATE.toLong() * initialSpeechTimeoutMs) / 1000L
+                val postSpeechSilenceThreshold = (SAMPLE_RATE.toLong() * postSpeechSilenceDurationMs) / 1000L
+                val minSpeechSamples = (SAMPLE_RATE.toLong() * minSpeechDurationMs) / 1000L
+                val maxTotalSamples = (SAMPLE_RATE.toLong() * maxTotalRecordingDurationMs) / 1000L
 
                 // ── 7. Recording loop ────────────────────────────────────────
                 while (isActive && isRecording) {
@@ -249,17 +274,47 @@ class WavRecorder(private val context: Context) {
                                 0
                             }
 
-                            // ── 8. VAD Logic (End of speech detection) ───────
+                            // ── 8. VAD Logic (3-Phase Speech & End-of-Speech Detection)
                             if (vadEnabled) {
-                                if (chunkRms < silenceRmsThreshold) {
-                                    consecutiveSilenceSamples += chunkSampleCount
+                                if (!hasSpeechDetected) {
+                                    // Fase 1: Menunggu pengguna mulai berbicara
+                                    if (chunkRms >= speechRmsThreshold) {
+                                        speechSamplesCount += chunkSampleCount
+                                        if (speechSamplesCount >= minSpeechSamples) {
+                                            hasSpeechDetected = true
+                                            consecutiveSilenceSamples = 0
+                                            Log.d(TAG, "🎙️ VAD: Suara pengguna terdeteksi! (RMS=$chunkRms >= $speechRmsThreshold)")
+                                        }
+                                    } else {
+                                        speechSamplesCount = 0
+                                    }
+
+                                    // Cek timeout awal jika belum ada suara
+                                    if (!hasSpeechDetected && accumTotalSamples >= initialTimeoutSamples) {
+                                        Log.w(TAG, "⏱️ VAD: Timeout awal tercapai (${initialSpeechTimeoutMs}ms). Tidak ada suara terdeteksi.")
+                                        lastStopReason = StopReason.INITIAL_TIMEOUT
+                                        isRecording = false
+                                    }
                                 } else {
-                                    consecutiveSilenceSamples = 0 // Reset silence counter if user speaks
+                                    // Fase 2 & 3: Suara sudah terdeteksi, deteksi jeda hening setelah berbicara
+                                    if (chunkRms < silenceRmsThreshold) {
+                                        consecutiveSilenceSamples += chunkSampleCount
+                                    } else {
+                                        consecutiveSilenceSamples = 0 // Reset hening jika berbicara kembali
+                                    }
+
+                                    if (consecutiveSilenceSamples >= postSpeechSilenceThreshold) {
+                                        Log.d(TAG, "🛑 VAD: Akhir ucapan terdeteksi. Hening ${postSpeechSilenceDurationMs}ms setelah berbicara.")
+                                        lastStopReason = StopReason.END_OF_SPEECH
+                                        isRecording = false
+                                    }
                                 }
 
-                                if (accumTotalSamples > minSamplesToRecord && consecutiveSilenceSamples >= silenceSamplesThreshold) {
-                                    Log.d(TAG, "🛑 VAD: End of speech detected. RMS=$chunkRms < $silenceRmsThreshold for ${maxSilenceDurationMs}ms.")
-                                    isRecording = false // Automatically stop recording
+                                // Batas maksimal rekaman
+                                if (accumTotalSamples >= maxTotalSamples) {
+                                    Log.w(TAG, "⚠️ VAD: Durasi maksimal tercapai (${maxTotalRecordingDurationMs}ms).")
+                                    lastStopReason = StopReason.MAX_DURATION
+                                    isRecording = false
                                 }
                             }
 
@@ -336,6 +391,7 @@ class WavRecorder(private val context: Context) {
 
     /** Stop an ongoing recording. */
     fun stopRecording() {
+        lastStopReason = StopReason.MANUAL_STOP
         isRecording = false
         Log.d(TAG, "stopRecording() called — isRecording set to false")
     }

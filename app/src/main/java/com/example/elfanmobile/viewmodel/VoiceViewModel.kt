@@ -96,12 +96,16 @@ class VoiceViewModel(
             // Capture diagnostic immediately after recording ends
             _audioDiagnostic.value = wavRecorder.lastDiagnostic
 
-            if (file != null && file.length() > 44) {
+            if (wavRecorder.lastStopReason == WavRecorder.StopReason.INITIAL_TIMEOUT || !wavRecorder.hasSpeechDetected) {
+                _recordingState.value = RecordingState.Error("Tidak ada suara terdeteksi.")
+                com.example.elfanmobile.audio.VoiceCommandManager.emitEvent(com.example.elfanmobile.audio.VoiceCommandManager.Event.COMMAND_FINISHED)
+            } else if (file != null && file.length() > 44) {
                 _recordingDuration.value = wavRecorder.lastRecordingDurationSeconds
                 _lastWavFile.value = file
                 uploadFile(file)
             } else {
                 _recordingState.value = RecordingState.Error("Rekaman kosong atau gagal dibuat")
+                com.example.elfanmobile.audio.VoiceCommandManager.emitEvent(com.example.elfanmobile.audio.VoiceCommandManager.Event.COMMAND_FINISHED)
             }
         }
         return true
