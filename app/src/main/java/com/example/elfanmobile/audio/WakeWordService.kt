@@ -38,6 +38,8 @@ class WakeWordService : Service(), RecognitionListener {
 
     private var model: Model? = null
     private var speechService: SpeechService? = null
+    private var ttsManager: TtsManager? = null
+    @Volatile private var isServiceRunning = false
     private val scope = CoroutineScope(Dispatchers.Main + SupervisorJob())
     private val mainHandler = Handler(Looper.getMainLooper())
 
@@ -50,8 +52,10 @@ class WakeWordService : Service(), RecognitionListener {
     override fun onCreate() {
         super.onCreate()
         Log.d(TAG, "onCreate()")
+        isServiceRunning = true
+        ttsManager = TtsManager(this)
         createNotificationChannel()
-        listenForCommandFinished()
+        listenForStateTransitions()
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -132,14 +136,46 @@ class WakeWordService : Service(), RecognitionListener {
     }
     
     private fun triggerDetectionIndicator(matchedText: String) {
-        showToast("🚨 WAKE WORD TERDETEKSI! Silakan ucapkan perintah...")
-        updateNotification("Merekam perintah Anda...")
-        
-        // 1. Hentikan Vosk agar mikrofon bisa dipakai oleh WavRecorder
-        speechService?.stop()
-        
-        // 2. Beri tahu ViewModel untuk langsung mulai merekam
-        VoiceCommandManager.emitEvent(VoiceCommandManager.Event.WAKE_WORD_DETECTED)
+        // Guard: Hanya proses jika state saat ini benar-benar STANDBY untuk mencegah pemicuan ganda
+        if (VoiceCommandManager.state.value != VoiceCommandManager.AssistantState.STANDBY) {
+            Log.d(TAG, "Pemicuan diabaikan karena sedang dalam state: ${VoiceCommandManager.state.value}")
+            return
+        }
+
+        Log.d(TAG, "🚨 Wake word terdeteksi: $matchedText")
+        VoiceCommandManager.updateState(VoiceCommandManager.AssistantState.WAKE_WORD_DETECTED)
+
+        // 1. Hentikan Vosk agar mikrofon sepenuhnya terlepas sebelum TTS atau AudioRecord
+        try {
+            speechService?.stop()
+        } catch (e: Exception) {
+            Log.e(TAG, "Gagal menghentikan Vosk", e)
+        }
+
+        showToast("🚨 WAKE WORD TERDETEKSI!")
+        updateNotification("Memutar respons suara...")
+
+        // 2. Putar respons suara "Baik, ada yang bisa saya bantu?"
+        VoiceCommandManager.updateState(VoiceCommandManager.AssistantState.SPEAKING_RESPONSE)
+        ttsManager?.speak(
+            text = "Baik, ada yang bisa saya bantu?",
+            onDone = {
+                // Berikan buffer jeda 150ms agar getaran/suara speaker tidak masuk ke mikrofon
+                scope.launch {
+                    delay(150)
+                    updateNotification("Mendengarkan perintah...")
+                    VoiceCommandManager.updateState(VoiceCommandManager.AssistantState.LISTENING_COMMAND)
+                }
+            },
+            onError = { errorMsg ->
+                Log.w(TAG, "TTS fallback visual ($errorMsg), langsung mendengarkan perintah")
+                scope.launch {
+                    showToast("Mendengarkan perintah...")
+                    updateNotification("Mendengarkan perintah...")
+                    VoiceCommandManager.updateState(VoiceCommandManager.AssistantState.LISTENING_COMMAND)
+                }
+            }
+        )
     }
 
     override fun onFinalResult(hypothesis: String?) {}
@@ -148,19 +184,22 @@ class WakeWordService : Service(), RecognitionListener {
     }
     override fun onTimeout() {}
 
-    private fun listenForCommandFinished() {
+    private fun listenForStateTransitions() {
         scope.launch {
-            VoiceCommandManager.events.collect { event ->
-                if (event == VoiceCommandManager.Event.COMMAND_FINISHED) {
-                    // Setelah perintah selesai dan terupload, nyalakan Vosk lagi
-                    showToast("Vosk kembali mendengarkan 'Okay Elfan'...")
-                    updateNotification("Siap! Ucapkan 'Okay Elfan'")
-                    
-                    // Restart listening
-                    try {
-                        speechService?.startListening(this@WakeWordService)
-                    } catch (e: Exception) {
-                        Log.e(TAG, "Gagal menyalakan ulang Vosk", e)
+            VoiceCommandManager.state.collect { state ->
+                if (state == VoiceCommandManager.AssistantState.RETURN_TO_STANDBY) {
+                    // Jeda sejenak untuk memastikan AudioRecord di WavRecorder telah sepenuhnya dirilis oleh OS
+                    delay(300)
+                    if (model != null && isServiceRunning) {
+                        updateNotification("Siap! Ucapkan 'Oke Elfan'")
+                        try {
+                            speechService?.startListening(this@WakeWordService)
+                            VoiceCommandManager.updateState(VoiceCommandManager.AssistantState.STANDBY)
+                            Log.d(TAG, "Vosk kembali mendengarkan 'Oke Elfan'")
+                        } catch (e: Exception) {
+                            Log.e(TAG, "Gagal mengaktifkan kembali Vosk", e)
+                            VoiceCommandManager.updateState(VoiceCommandManager.AssistantState.STANDBY, "Gagal restart mic")
+                        }
                     }
                 }
             }
@@ -197,11 +236,14 @@ class WakeWordService : Service(), RecognitionListener {
 
     override fun onDestroy() {
         super.onDestroy()
+        isServiceRunning = false
         speechService?.stop()
         speechService?.shutdown()
         speechService = null
         model?.close()
         model = null
+        ttsManager?.shutdown()
+        ttsManager = null
         showToast("Vosk dimatikan.")
     }
 

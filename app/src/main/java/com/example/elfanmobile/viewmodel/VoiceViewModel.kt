@@ -69,10 +69,11 @@ class VoiceViewModel(
 
     init {
         viewModelScope.launch {
-            com.example.elfanmobile.audio.VoiceCommandManager.events.collect { event ->
-                if (event == com.example.elfanmobile.audio.VoiceCommandManager.Event.WAKE_WORD_DETECTED) {
-                    kotlinx.coroutines.delay(300)
-                    startRecording()
+            com.example.elfanmobile.audio.VoiceCommandManager.state.collect { state ->
+                if (state == com.example.elfanmobile.audio.VoiceCommandManager.AssistantState.LISTENING_COMMAND) {
+                    if (_recordingState.value !is RecordingState.Recording) {
+                        startRecording()
+                    }
                 }
             }
         }
@@ -87,6 +88,10 @@ class VoiceViewModel(
     fun startRecording(): Boolean {
         if (!wavRecorder.hasMicrophonePermission()) return false
 
+        if (com.example.elfanmobile.audio.VoiceCommandManager.state.value != com.example.elfanmobile.audio.VoiceCommandManager.AssistantState.LISTENING_COMMAND) {
+            com.example.elfanmobile.audio.VoiceCommandManager.updateState(com.example.elfanmobile.audio.VoiceCommandManager.AssistantState.LISTENING_COMMAND)
+        }
+
         recordingJob = viewModelScope.launch {
             _recordingState.value = RecordingState.Recording
             _recordingDuration.value = 0f
@@ -98,14 +103,20 @@ class VoiceViewModel(
 
             if (wavRecorder.lastStopReason == WavRecorder.StopReason.INITIAL_TIMEOUT || !wavRecorder.hasSpeechDetected) {
                 _recordingState.value = RecordingState.Error("Tidak ada suara terdeteksi.")
-                com.example.elfanmobile.audio.VoiceCommandManager.emitEvent(com.example.elfanmobile.audio.VoiceCommandManager.Event.COMMAND_FINISHED)
+                com.example.elfanmobile.audio.VoiceCommandManager.updateState(
+                    com.example.elfanmobile.audio.VoiceCommandManager.AssistantState.RETURN_TO_STANDBY,
+                    "Tidak ada suara terdeteksi"
+                )
             } else if (file != null && file.length() > 44) {
                 _recordingDuration.value = wavRecorder.lastRecordingDurationSeconds
                 _lastWavFile.value = file
                 uploadFile(file)
             } else {
                 _recordingState.value = RecordingState.Error("Rekaman kosong atau gagal dibuat")
-                com.example.elfanmobile.audio.VoiceCommandManager.emitEvent(com.example.elfanmobile.audio.VoiceCommandManager.Event.COMMAND_FINISHED)
+                com.example.elfanmobile.audio.VoiceCommandManager.updateState(
+                    com.example.elfanmobile.audio.VoiceCommandManager.AssistantState.RETURN_TO_STANDBY,
+                    "Rekaman kosong"
+                )
             }
         }
         return true
@@ -124,6 +135,7 @@ class VoiceViewModel(
         wavRecorder.stopRecording()
         recordingJob?.cancel()
         _recordingState.value = RecordingState.Idle
+        com.example.elfanmobile.audio.VoiceCommandManager.updateState(com.example.elfanmobile.audio.VoiceCommandManager.AssistantState.RETURN_TO_STANDBY)
     }
 
     /** Test connection to Raspberry Pi. Returns user-friendly message. */
@@ -171,31 +183,39 @@ class VoiceViewModel(
 
     private suspend fun uploadFile(file: File) {
         _recordingState.value = RecordingState.Uploading
+        com.example.elfanmobile.audio.VoiceCommandManager.updateState(
+            com.example.elfanmobile.audio.VoiceCommandManager.AssistantState.PROCESSING,
+            "Mengirim ke ELFAN..."
+        )
         val baseUrl = settingsRepository.raspberryPiUrl.first()
 
-        val uploadResult = voiceRepository.sendVoiceCommand(baseUrl, file)
+        try {
+            val uploadResult = voiceRepository.sendVoiceCommand(baseUrl, file)
 
-        uploadResult.fold(
-            onSuccess = { elfanResult ->
-                _recordingState.value = RecordingState.Success(elfanResult)
-            },
-            onFailure = { error ->
-                val message = when (error) {
-                    is ConnectException ->
-                        "❌ Raspberry Pi tidak dapat dihubungi.\nPastikan server menyala dan IP benar."
-                    is SocketTimeoutException ->
-                        "⏱ Server tidak merespons (timeout).\nWisper mungkin sedang berjalan lambat."
-                    is IOException ->
-                        "❌ Network error: ${error.message}"
-                    else ->
-                        "❌ Error: ${error.message}"
+            uploadResult.fold(
+                onSuccess = { elfanResult ->
+                    _recordingState.value = RecordingState.Success(elfanResult)
+                },
+                onFailure = { error ->
+                    val message = when (error) {
+                        is ConnectException ->
+                            "❌ Raspberry Pi tidak dapat dihubungi.\nPastikan server menyala dan IP benar."
+                        is SocketTimeoutException ->
+                            "⏱ Server tidak merespons (timeout).\nWisper mungkin sedang berjalan lambat."
+                        is IOException ->
+                            "❌ Network error: ${error.message}"
+                        else ->
+                            "❌ Error: ${error.message}"
+                    }
+                    _recordingState.value = RecordingState.Error(message)
                 }
-                _recordingState.value = RecordingState.Error(message)
-            }
-        )
-        
-        // Beri tahu WakeWordService bahwa mikrofon sudah selesai dipakai
-        com.example.elfanmobile.audio.VoiceCommandManager.emitEvent(com.example.elfanmobile.audio.VoiceCommandManager.Event.COMMAND_FINISHED)
+            )
+        } finally {
+            // Selalu kembalikan asisten ke standby tanpa macet, bahkan jika jaringan error/timeout
+            com.example.elfanmobile.audio.VoiceCommandManager.updateState(
+                com.example.elfanmobile.audio.VoiceCommandManager.AssistantState.RETURN_TO_STANDBY
+            )
+        }
     }
 
     // ── Factory ───────────────────────────────────────────────────────────────

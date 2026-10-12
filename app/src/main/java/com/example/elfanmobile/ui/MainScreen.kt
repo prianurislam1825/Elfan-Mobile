@@ -80,6 +80,7 @@ fun MainScreen(
     val baseUrl by viewModel.raspberryPiUrl.collectAsState(initial = "")
     val debugMode by viewModel.debugMode.collectAsState(initial = false)
     val audioDiagnostic by viewModel.audioDiagnostic.collectAsState()
+    val assistantState by com.example.elfanmobile.audio.VoiceCommandManager.state.collectAsState()
 
     Scaffold(
         topBar = {
@@ -121,7 +122,7 @@ fun MainScreen(
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
             // ── Status indicator ─────────────────────────────────────────────
-            StatusIndicator(state = state)
+            StatusIndicator(state = state, assistantState = assistantState)
 
             Spacer(modifier = Modifier.height(32.dp))
 
@@ -189,13 +190,29 @@ fun MainScreen(
 // ─────────────────────────────────────────────────────────────────────────────
 
 @Composable
-private fun StatusIndicator(state: VoiceViewModel.RecordingState) {
-    val (dotColor, label) = when (state) {
-        is VoiceViewModel.RecordingState.Idle -> Pair(Color(0xFF4CAF50), "● SIAP")
-        is VoiceViewModel.RecordingState.Recording -> Pair(Color(0xFFF44336), "🎙 MENDENGARKAN...")
-        is VoiceViewModel.RecordingState.Uploading -> Pair(Color(0xFFFF9800), "⏳ MENGIRIM KE ELFAN...")
-        is VoiceViewModel.RecordingState.Success -> Pair(Color(0xFF4CAF50), "✓ SELESAI")
-        is VoiceViewModel.RecordingState.Error -> Pair(Color(0xFFF44336), "❌ ERROR")
+private fun StatusIndicator(
+    state: VoiceViewModel.RecordingState,
+    assistantState: com.example.elfanmobile.audio.VoiceCommandManager.AssistantState
+) {
+    val (dotColor, label) = when {
+        assistantState == com.example.elfanmobile.audio.VoiceCommandManager.AssistantState.WAKE_WORD_DETECTED ->
+            Pair(Color(0xFFFF9800), "🚨 WAKE WORD TERDETEKSI")
+        assistantState == com.example.elfanmobile.audio.VoiceCommandManager.AssistantState.SPEAKING_RESPONSE ->
+            Pair(Color(0xFF2196F3), "🗣️ ELFAN MERESPONS...")
+        assistantState == com.example.elfanmobile.audio.VoiceCommandManager.AssistantState.LISTENING_COMMAND ||
+        state is VoiceViewModel.RecordingState.Recording ->
+            Pair(Color(0xFFF44336), "🎙 MENDENGARKAN PERINTAH...")
+        assistantState == com.example.elfanmobile.audio.VoiceCommandManager.AssistantState.PROCESSING ||
+        state is VoiceViewModel.RecordingState.Uploading ->
+            Pair(Color(0xFFFF9800), "⏳ MEMPROSES KE ELFAN...")
+        state is VoiceViewModel.RecordingState.Success ->
+            Pair(Color(0xFF4CAF50), "✓ SELESAI")
+        state is VoiceViewModel.RecordingState.Error ->
+            Pair(Color(0xFFF44336), "❌ ERROR")
+        assistantState == com.example.elfanmobile.audio.VoiceCommandManager.AssistantState.RETURN_TO_STANDBY ->
+            Pair(Color(0xFF9E9E9E), "🔄 MENYIAPKAN STANDBY...")
+        else ->
+            Pair(Color(0xFF4CAF50), "● STANDBY (Katakan 'Oke Elfan')")
     }
 
     val infiniteTransition = rememberInfiniteTransition(label = "pulse")
