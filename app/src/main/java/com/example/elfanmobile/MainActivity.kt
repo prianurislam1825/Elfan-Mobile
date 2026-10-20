@@ -57,19 +57,19 @@ fun ElfanApp(activity: MainActivity) {
     var showSettings by remember { mutableStateOf(false) }
     var showPermissionDialog by remember { mutableStateOf(false) }
 
-    // Start/Stop WakeWordService based on settings
+    // Start/Stop OnnxWakeWordService (implementasi utama ONNX) berdasarkan pengaturan
     val wakeWordEnabled by viewModel.wakeWordEnabled.collectAsState(initial = false)
     androidx.compose.runtime.LaunchedEffect(wakeWordEnabled) {
-        val intent = android.content.Intent(activity, com.example.elfanmobile.audio.WakeWordService::class.java)
+        val intent = android.content.Intent(activity, com.example.elfanmobile.audio.OnnxWakeWordService::class.java)
         if (wakeWordEnabled) {
-            intent.action = com.example.elfanmobile.audio.WakeWordService.ACTION_START
+            intent.action = com.example.elfanmobile.audio.OnnxWakeWordService.ACTION_START
             if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
                 activity.startForegroundService(intent)
             } else {
                 activity.startService(intent)
             }
         } else {
-            intent.action = com.example.elfanmobile.audio.WakeWordService.ACTION_STOP
+            intent.action = com.example.elfanmobile.audio.OnnxWakeWordService.ACTION_STOP
             activity.startService(intent)
         }
     }
@@ -79,7 +79,7 @@ fun ElfanApp(activity: MainActivity) {
         contract = ActivityResultContracts.RequestPermission()
     ) { isGranted ->
         if (isGranted) {
-            viewModel.startRecording()
+            viewModel.startRecording(isPushToTalk = true)
         } else {
             showPermissionDialog = true
         }

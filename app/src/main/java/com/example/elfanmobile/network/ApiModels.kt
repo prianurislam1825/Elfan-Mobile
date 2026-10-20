@@ -12,7 +12,8 @@ data class VoiceResponse(
     val text: String? = null,
     val command: CommandResult? = null,
     val result: DeviceResult? = null,
-    val error: String? = null
+    val error: String? = null,
+    val message: String? = null
 )
 
 /**

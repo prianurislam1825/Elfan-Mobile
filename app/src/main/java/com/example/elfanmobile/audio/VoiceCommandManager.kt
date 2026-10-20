@@ -9,18 +9,19 @@ import kotlinx.coroutines.flow.asStateFlow
  * VoiceCommandManager
  *
  * Koordinator State Machine terpusat untuk asisten suara ELFAN:
- * STANDBY -> WAKE_WORD_DETECTED -> SPEAKING_RESPONSE -> LISTENING_COMMAND -> PROCESSING -> RETURN_TO_STANDBY
+ * STANDBY -> WAKE_DETECTED -> SPEAKING_PROMPT -> LISTENING_COMMAND -> PROCESSING_COMMAND -> SPEAKING_RESPONSE -> RECOVERING -> STANDBY
  */
 object VoiceCommandManager {
     private const val TAG = "VoiceCommandManager"
 
     enum class AssistantState {
-        STANDBY,            // Mode standby aktif, menunggu wake word
-        WAKE_WORD_DETECTED, // Wake word terdeteksi
-        SPEAKING_RESPONSE,  // Memutar suara konfirmasi "Baik, ada yang bisa saya bantu?"
-        LISTENING_COMMAND,  // Merekam perintah pengguna (VAD aktif)
-        PROCESSING,         // Mengirim & memproses perintah ke Raspberry Pi
-        RETURN_TO_STANDBY   // Transisi menyelesaikan sesi dan kembali standby
+        STANDBY,            // Memantau mikrofon dan mendeteksi wake word
+        WAKE_DETECTED,      // Wake word "Oke Elfan" terdeteksi
+        SPEAKING_PROMPT,    // Mengucapkan "Ada yang bisa saya bantu?"
+        LISTENING_COMMAND,  // Merekam perintah suara pengguna (VAD aktif)
+        PROCESSING_COMMAND, // Mengirim audio dan menunggu respons backend Raspberry Pi
+        SPEAKING_RESPONSE,  // Mengucapkan hasil eksekusi perintah melalui TTS
+        RECOVERING          // Membersihkan resource & jeda pemulihan sebelum kembali STANDBY
     }
 
     private val _state = MutableStateFlow(AssistantState.STANDBY)
@@ -29,8 +30,49 @@ object VoiceCommandManager {
     private val _statusMessage = MutableStateFlow("Siap menerima perintah")
     val statusMessage: StateFlow<String> = _statusMessage.asStateFlow()
 
+    private var ttsManager: TtsManager? = null
+
     /**
-     * Memperbarui status asisten suara dengan pengaman transisi.
+     * Mendaftarkan instance TtsManager terpusat.
+     */
+    fun registerTtsManager(manager: TtsManager) {
+        ttsManager = manager
+        Log.d(TAG, "TtsManager berhasil didaftarkan ke VoiceCommandManager")
+    }
+
+    /**
+     * Memutar respons suara TTS terpusat.
+     */
+    fun speak(
+        text: String,
+        onDone: () -> Unit,
+        onError: ((String) -> Unit)? = null
+    ) {
+        val tts = ttsManager
+        if (tts != null) {
+            tts.speak(
+                text = text,
+                onDone = onDone,
+                onError = { err ->
+                    Log.w(TAG, "TTS playback error ($err), menjalankan fallback onDone")
+                    onError?.invoke(err) ?: onDone()
+                }
+            )
+        } else {
+            Log.w(TAG, "TtsManager belum siap, langsung memanggil onDone")
+            onDone()
+        }
+    }
+
+    /**
+     * Menghentikan TTS jika sedang berbicara.
+     */
+    fun stopSpeaking() {
+        ttsManager?.stop()
+    }
+
+    /**
+     * Memperbarui status asisten suara dengan pengaman transisi thread-safe.
      */
     @Synchronized
     fun updateState(newState: AssistantState, customMessage: String? = null) {
@@ -39,12 +81,22 @@ object VoiceCommandManager {
         _state.value = newState
 
         _statusMessage.value = customMessage ?: when (newState) {
-            AssistantState.STANDBY -> "● SIAP (Katakan 'Oke Elfan')"
-            AssistantState.WAKE_WORD_DETECTED -> "🚨 WAKE WORD TERDETEKSI"
-            AssistantState.SPEAKING_RESPONSE -> "🗣️ ELFAN: \"Baik, ada yang bisa saya bantu?\""
+            AssistantState.STANDBY -> "● STANDBY (Katakan 'Oke Elfan')"
+            AssistantState.WAKE_DETECTED -> "🚨 WAKE WORD TERDETEKSI"
+            AssistantState.SPEAKING_PROMPT -> "🗣️ ELFAN: \"Ada yang bisa saya bantu?\""
             AssistantState.LISTENING_COMMAND -> "🎙️ MENDENGARKAN PERINTAH..."
-            AssistantState.PROCESSING -> "⏳ MEMPROSES KE ELFAN..."
-            AssistantState.RETURN_TO_STANDBY -> "🔄 MENYIAPKAN STANDBY..."
+            AssistantState.PROCESSING_COMMAND -> "⏳ MEMPROSES KE ELFAN..."
+            AssistantState.SPEAKING_RESPONSE -> "🗣️ ELFAN MENJAWAB..."
+            AssistantState.RECOVERING -> "🔄 MENYIAPKAN STANDBY..."
         }
+    }
+
+    /**
+     * Memindahkan status ke RECOVERING lalu otomatis kembali ke STANDBY setelah jeda.
+     */
+    suspend fun transitionToStandby(cooldownMs: Long = 300L) {
+        updateState(AssistantState.RECOVERING)
+        kotlinx.coroutines.delay(cooldownMs)
+        updateState(AssistantState.STANDBY)
     }
 }

@@ -37,6 +37,10 @@ android {
         excludes += "/META-INF/{AL2.0,LGPL2.1}"
       }
     }
+
+    testOptions {
+      unitTests.isReturnDefaultValues = true
+    }
 }
 
 kotlin {
@@ -98,6 +102,9 @@ dependencies {
   // Coroutines Android
   implementation(libs.kotlinx.coroutines.android)
 
-  // Vosk Android Prototype
+  // Vosk Android Prototype (dipertahankan sebagai referensi, bukan solusi utama)
   implementation("com.alphacephei:vosk-android:0.3.47")
+
+  // ONNX Runtime Android — digunakan oleh OnnxWakeWordDetector dan OnnxWakeWordService
+  implementation(libs.onnxruntime.android)
 }

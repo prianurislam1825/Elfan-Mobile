@@ -8,6 +8,7 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
 
     <application
         android:allowBackup="true"
@@ -30,6 +31,12 @@
 
         <service
             android:name=".audio.WakeWordService"
+            android:exported="false"
+            android:foregroundServiceType="microphone" />
+
+        <!-- Implementasi utama wake word ONNX (menggantikan Vosk WakeWordService) -->
+        <service
+            android:name=".audio.OnnxWakeWordService"
             android:exported="false"
             android:foregroundServiceType="microphone" />
     </application>

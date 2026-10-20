@@ -105,11 +105,11 @@ class WavRecorder(private val context: Context) {
     }
 
     var vadEnabled: Boolean = true
-    var speechRmsThreshold: Int = 1200 // RMS di atas ini dianggap sebagai suara/bicara
-    var silenceRmsThreshold: Int = 800  // RMS di bawah ini dianggap hening setelah suara terdeteksi
+    var speechRmsThreshold: Int = 450 // RMS di atas ini dianggap sebagai suara/bicara normal
+    var silenceRmsThreshold: Int = 280  // RMS di bawah ini dianggap hening setelah suara terdeteksi
     var initialSpeechTimeoutMs: Long = 5000L // Batas waktu menunggu pengguna mulai berbicara (5 detik)
-    var postSpeechSilenceDurationMs: Long = 2500L // Jeda hening setelah berbicara sebelum selesai (2.5 detik)
-    var minSpeechDurationMs: Long = 500L // Minimal durasi suara aktif agar dianggap perintah valid
+    var postSpeechSilenceDurationMs: Long = 1800L // Jeda hening setelah berbicara sebelum selesai (1.8 detik)
+    var minSpeechDurationMs: Long = 160L // Minimal akumulasi durasi suara aktif (160ms) agar dianggap perintah valid
     var maxTotalRecordingDurationMs: Long = 20000L // Batas pengaman rekaman maksimal (20 detik)
 
     /** Menandakan apakah ada suara pengguna yang terdeteksi selama sesi rekaman ini */
@@ -158,29 +158,41 @@ class WavRecorder(private val context: Context) {
         val bufferSize = maxOf(minBufferSize * 2, 4096)
         Log.d(TAG, "bufferSize=$bufferSize")
 
-        // ── 3. Create AudioRecord ────────────────────────────────────────────
-        // Try MIC first, fallback to VOICE_RECOGNITION if blocked
+        // ── 3. Create AudioRecord dengan mekanisme retry (hand-off resilience) ──
         val audioSource = MediaRecorder.AudioSource.MIC
         Log.d(TAG, "AudioSource=$audioSource (MIC=${MediaRecorder.AudioSource.MIC})")
 
-        val record = AudioRecord(
-            audioSource,
-            SAMPLE_RATE,
-            CHANNEL_CONFIG,
-            AUDIO_FORMAT,
-            bufferSize
-        )
+        var record: AudioRecord? = null
+        var initAttempts = 0
+        while (initAttempts < 3) {
+            initAttempts++
+            try {
+                val candidate = AudioRecord(
+                    audioSource,
+                    SAMPLE_RATE,
+                    CHANNEL_CONFIG,
+                    AUDIO_FORMAT,
+                    bufferSize
+                )
+                if (candidate.state == AudioRecord.STATE_INITIALIZED) {
+                    record = candidate
+                    break
+                } else {
+                    Log.w(TAG, "AudioRecord attempt #$initAttempts gagal (state=${candidate.state}), retry setelah jeda...")
+                    candidate.release()
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "AudioRecord attempt #$initAttempts exception: ${e.message}")
+            }
+            kotlinx.coroutines.delay(100)
+        }
 
-        Log.d(TAG, "AudioRecord.state=${record.state} " +
-                "(STATE_INITIALIZED=${AudioRecord.STATE_INITIALIZED}, " +
-                "STATE_UNINITIALIZED=${AudioRecord.STATE_UNINITIALIZED})")
-
-        if (record.state != AudioRecord.STATE_INITIALIZED) {
-            Log.e(TAG, "❌ AudioRecord failed to initialize — state=${record.state}")
-            record.release()
+        if (record == null || record.state != AudioRecord.STATE_INITIALIZED) {
+            Log.e(TAG, "❌ AudioRecord gagal diinisialisasi setelah 3 percobaan")
+            record?.release()
             return@withContext null
         }
-        Log.d(TAG, "✅ AudioRecord STATE_INITIALIZED")
+        Log.d(TAG, "✅ AudioRecord STATE_INITIALIZED (berhasil pada percobaan #$initAttempts)")
 
         // ── 4. Prepare output file ───────────────────────────────────────────
         val file = File(context.cacheDir, OUTPUT_FILE_NAME)
@@ -286,7 +298,8 @@ class WavRecorder(private val context: Context) {
                                             Log.d(TAG, "🎙️ VAD: Suara pengguna terdeteksi! (RMS=$chunkRms >= $speechRmsThreshold)")
                                         }
                                     } else {
-                                        speechSamplesCount = 0
+                                        // Jangan langsung reset ke 0 pada jeda konsonan/unvoiced, tetapi decay perlahan
+                                        speechSamplesCount = maxOf(0L, speechSamplesCount - chunkSampleCount / 2)
                                     }
 
                                     // Cek timeout awal jika belum ada suara
@@ -346,6 +359,19 @@ class WavRecorder(private val context: Context) {
                 // ── Store final accumulated diagnostic ───────────────────────
                 val durSec = totalBytesWritten.toFloat() / BYTE_RATE
                 val allZero = accumNonZero == 0L
+
+                // Verifikasi integritas sinyal suara aktual pasca rekaman:
+                // Jika audio memiliki peak amplitude dan durasi memadai, konfirmasi hasSpeechDetected
+                if (!hasSpeechDetected) {
+                    if (accumPeak >= 400 && accumNonZero > 1000 && durSec >= 0.4f) {
+                        hasSpeechDetected = true
+                        Log.d(TAG, "✅ Audio integrity: Suara valid terkonfirmasi post-recording (peak=$accumPeak, nonZero=$accumNonZero, dur=${durSec}s)")
+                    } else if (lastStopReason == StopReason.MANUAL_STOP && accumPeak >= 300 && durSec >= 0.3f) {
+                        hasSpeechDetected = true
+                        Log.d(TAG, "✅ Manual stop: Pengguna menghentikan rekaman valid (peak=$accumPeak, dur=${durSec}s)")
+                    }
+                }
+
                 lastDiagnostic = AudioDiagnostic(
                     totalBytesRead   = totalBytesWritten,
                     totalSamples     = accumTotalSamples,

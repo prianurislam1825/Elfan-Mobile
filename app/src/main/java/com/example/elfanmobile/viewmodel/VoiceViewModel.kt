@@ -4,6 +4,8 @@ import android.content.Context
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
+import com.example.elfanmobile.audio.VoiceCommandManager
+import com.example.elfanmobile.audio.VoiceCommandManager.AssistantState
 import com.example.elfanmobile.audio.WavRecorder
 import com.example.elfanmobile.network.ElfanApi
 import com.example.elfanmobile.network.ElfanResult
@@ -66,13 +68,14 @@ class VoiceViewModel(
 
     private val wavRecorder = WavRecorder(appContext)
     private var recordingJob: Job? = null
+    private var isCurrentSessionPushToTalk = false
 
     init {
         viewModelScope.launch {
-            com.example.elfanmobile.audio.VoiceCommandManager.state.collect { state ->
-                if (state == com.example.elfanmobile.audio.VoiceCommandManager.AssistantState.LISTENING_COMMAND) {
-                    if (_recordingState.value !is RecordingState.Recording) {
-                        startRecording()
+            VoiceCommandManager.state.collect { state ->
+                if (state == AssistantState.LISTENING_COMMAND) {
+                    if (_recordingState.value is RecordingState.Idle) {
+                        startRecording(isPushToTalk = false)
                     }
                 }
             }
@@ -84,39 +87,41 @@ class VoiceViewModel(
     /** @return true if microphone permission is currently granted */
     fun hasMicrophonePermission(): Boolean = wavRecorder.hasMicrophonePermission()
 
-    /** Start recording. Returns false if permission not granted. */
-    fun startRecording(): Boolean {
+    /** Start recording. Returns false if permission not granted or if already recording/uploading. */
+    fun startRecording(isPushToTalk: Boolean = true): Boolean {
         if (!wavRecorder.hasMicrophonePermission()) return false
 
-        if (com.example.elfanmobile.audio.VoiceCommandManager.state.value != com.example.elfanmobile.audio.VoiceCommandManager.AssistantState.LISTENING_COMMAND) {
-            com.example.elfanmobile.audio.VoiceCommandManager.updateState(com.example.elfanmobile.audio.VoiceCommandManager.AssistantState.LISTENING_COMMAND)
+        // Reentrancy / debouncing check
+        if (_recordingState.value is RecordingState.Recording || _recordingState.value is RecordingState.Uploading) {
+            return false
+        }
+
+        isCurrentSessionPushToTalk = isPushToTalk
+        _recordingState.value = RecordingState.Recording
+        _recordingDuration.value = 0f
+
+        if (VoiceCommandManager.state.value != AssistantState.LISTENING_COMMAND) {
+            VoiceCommandManager.updateState(AssistantState.LISTENING_COMMAND)
         }
 
         recordingJob = viewModelScope.launch {
-            _recordingState.value = RecordingState.Recording
-            _recordingDuration.value = 0f
-
             val file = wavRecorder.startRecording()  // suspends until stopRecording() called
 
             // Capture diagnostic immediately after recording ends
             _audioDiagnostic.value = wavRecorder.lastDiagnostic
 
             if (wavRecorder.lastStopReason == WavRecorder.StopReason.INITIAL_TIMEOUT || !wavRecorder.hasSpeechDetected) {
-                _recordingState.value = RecordingState.Error("Tidak ada suara terdeteksi.")
-                com.example.elfanmobile.audio.VoiceCommandManager.updateState(
-                    com.example.elfanmobile.audio.VoiceCommandManager.AssistantState.RETURN_TO_STANDBY,
-                    "Tidak ada suara terdeteksi"
-                )
+                val msg = "Tidak ada suara terdeteksi."
+                _recordingState.value = RecordingState.Error(msg)
+                speakAndReturnToStandby(msg)
             } else if (file != null && file.length() > 44) {
                 _recordingDuration.value = wavRecorder.lastRecordingDurationSeconds
                 _lastWavFile.value = file
                 uploadFile(file)
             } else {
-                _recordingState.value = RecordingState.Error("Rekaman kosong atau gagal dibuat")
-                com.example.elfanmobile.audio.VoiceCommandManager.updateState(
-                    com.example.elfanmobile.audio.VoiceCommandManager.AssistantState.RETURN_TO_STANDBY,
-                    "Rekaman kosong"
-                )
+                val msg = "Rekaman kosong atau gagal dibuat."
+                _recordingState.value = RecordingState.Error(msg)
+                speakAndReturnToStandby(msg)
             }
         }
         return true
@@ -133,9 +138,12 @@ class VoiceViewModel(
     /** Cancel current operation and reset to Idle. */
     fun reset() {
         wavRecorder.stopRecording()
+        VoiceCommandManager.stopSpeaking()
         recordingJob?.cancel()
         _recordingState.value = RecordingState.Idle
-        com.example.elfanmobile.audio.VoiceCommandManager.updateState(com.example.elfanmobile.audio.VoiceCommandManager.AssistantState.RETURN_TO_STANDBY)
+        viewModelScope.launch {
+            VoiceCommandManager.transitionToStandby(200)
+        }
     }
 
     /** Test connection to Raspberry Pi. Returns user-friendly message. */
@@ -183,38 +191,103 @@ class VoiceViewModel(
 
     private suspend fun uploadFile(file: File) {
         _recordingState.value = RecordingState.Uploading
-        com.example.elfanmobile.audio.VoiceCommandManager.updateState(
-            com.example.elfanmobile.audio.VoiceCommandManager.AssistantState.PROCESSING,
+        VoiceCommandManager.updateState(
+            AssistantState.PROCESSING_COMMAND,
             "Mengirim ke ELFAN..."
         )
         val baseUrl = settingsRepository.raspberryPiUrl.first()
 
         try {
-            val uploadResult = voiceRepository.sendVoiceCommand(baseUrl, file)
+            val mode = if (isCurrentSessionPushToTalk) "push_to_talk" else null
+            val uploadResult = voiceRepository.sendVoiceCommand(baseUrl, file, mode)
 
             uploadResult.fold(
                 onSuccess = { elfanResult ->
                     _recordingState.value = RecordingState.Success(elfanResult)
+                    val spoken = buildSpokenFeedback(elfanResult)
+                    speakAndReturnToStandby(spoken)
                 },
                 onFailure = { error ->
-                    val message = when (error) {
-                        is ConnectException ->
-                            "❌ Raspberry Pi tidak dapat dihubungi.\nPastikan server menyala dan IP benar."
-                        is SocketTimeoutException ->
-                            "⏱ Server tidak merespons (timeout).\nWisper mungkin sedang berjalan lambat."
-                        is IOException ->
-                            "❌ Network error: ${error.message}"
-                        else ->
-                            "❌ Error: ${error.message}"
-                    }
-                    _recordingState.value = RecordingState.Error(message)
+                    val (uiMsg, spokenMsg) = mapErrorToFeedback(error)
+                    _recordingState.value = RecordingState.Error(uiMsg)
+                    speakAndReturnToStandby(spokenMsg)
                 }
             )
-        } finally {
-            // Selalu kembalikan asisten ke standby tanpa macet, bahkan jika jaringan error/timeout
-            com.example.elfanmobile.audio.VoiceCommandManager.updateState(
-                com.example.elfanmobile.audio.VoiceCommandManager.AssistantState.RETURN_TO_STANDBY
-            )
+        } catch (e: Exception) {
+            val (uiMsg, spokenMsg) = mapErrorToFeedback(e)
+            _recordingState.value = RecordingState.Error(uiMsg)
+            speakAndReturnToStandby(spokenMsg)
+        }
+    }
+
+    private fun speakAndReturnToStandby(text: String) {
+        VoiceCommandManager.updateState(AssistantState.SPEAKING_RESPONSE, text)
+        VoiceCommandManager.speak(
+            text = text,
+            onDone = {
+                viewModelScope.launch {
+                    VoiceCommandManager.transitionToStandby(300)
+                }
+            },
+            onError = {
+                viewModelScope.launch {
+                    VoiceCommandManager.transitionToStandby(300)
+                }
+            }
+        )
+    }
+
+    private fun buildSpokenFeedback(result: ElfanResult): String {
+        if (result.success) {
+            val device = result.device.lowercase()
+            val action = when (result.action.uppercase()) {
+                "ON", "TURN_ON" -> "dinyalakan"
+                "OFF", "TURN_OFF" -> "dimatikan"
+                else -> result.action.lowercase()
+            }
+            return if (device != "-" && action != "-") {
+                "Baik, $device telah $action."
+            } else {
+                "Baik, perintah berhasil dijalankan."
+            }
+        } else {
+            val err = result.rawResponse.error ?: result.rawResponse.message
+            return when {
+                !err.isNullOrBlank() -> {
+                    if (err.contains("wake word", ignoreCase = true)) {
+                        "Maaf, wake word tidak terdeteksi oleh server."
+                    } else {
+                        "Maaf, $err."
+                    }
+                }
+                result.rawResponse.command?.success == false -> "Maaf, perintah tidak dikenali."
+                else -> "Maaf, perintah belum berhasil dijalankan."
+            }
+        }
+    }
+
+    private fun mapErrorToFeedback(error: Throwable): Pair<String, String> {
+        return when (error) {
+            is ConnectException ->
+                Pair(
+                    "❌ Raspberry Pi tidak dapat dihubungi.\nPastikan server menyala dan IP benar.",
+                    "Maaf, Raspberry Pi tidak dapat dihubungi."
+                )
+            is SocketTimeoutException ->
+                Pair(
+                    "⏱ Server tidak merespons (timeout).\nWisper mungkin sedang berjalan lambat.",
+                    "Maaf, server tidak merespons. Waktu tunggu habis."
+                )
+            is IOException ->
+                Pair(
+                    "❌ Network error: ${error.message}",
+                    "Maaf, terjadi gangguan jaringan."
+                )
+            else ->
+                Pair(
+                    "❌ Error: ${error.message}",
+                    "Maaf, terjadi kesalahan."
+                )
         }
     }
 

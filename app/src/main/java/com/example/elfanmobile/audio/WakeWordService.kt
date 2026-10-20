@@ -143,7 +143,7 @@ class WakeWordService : Service(), RecognitionListener {
         }
 
         Log.d(TAG, "🚨 Wake word terdeteksi: $matchedText")
-        VoiceCommandManager.updateState(VoiceCommandManager.AssistantState.WAKE_WORD_DETECTED)
+        VoiceCommandManager.updateState(VoiceCommandManager.AssistantState.WAKE_DETECTED)
 
         // 1. Hentikan Vosk agar mikrofon sepenuhnya terlepas sebelum TTS atau AudioRecord
         try {
@@ -155,10 +155,10 @@ class WakeWordService : Service(), RecognitionListener {
         showToast("🚨 WAKE WORD TERDETEKSI!")
         updateNotification("Memutar respons suara...")
 
-        // 2. Putar respons suara "Baik, ada yang bisa saya bantu?"
-        VoiceCommandManager.updateState(VoiceCommandManager.AssistantState.SPEAKING_RESPONSE)
+        // 2. Putar respons suara "Ada yang bisa saya bantu?"
+        VoiceCommandManager.updateState(VoiceCommandManager.AssistantState.SPEAKING_PROMPT)
         ttsManager?.speak(
-            text = "Baik, ada yang bisa saya bantu?",
+            text = "Ada yang bisa saya bantu?",
             onDone = {
                 // Berikan buffer jeda 150ms agar getaran/suara speaker tidak masuk ke mikrofon
                 scope.launch {
@@ -187,7 +187,7 @@ class WakeWordService : Service(), RecognitionListener {
     private fun listenForStateTransitions() {
         scope.launch {
             VoiceCommandManager.state.collect { state ->
-                if (state == VoiceCommandManager.AssistantState.RETURN_TO_STANDBY) {
+                if (state == VoiceCommandManager.AssistantState.RECOVERING) {
                     // Jeda sejenak untuk memastikan AudioRecord di WavRecorder telah sepenuhnya dirilis oleh OS
                     delay(300)
                     if (model != null && isServiceRunning) {

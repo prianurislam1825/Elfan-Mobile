@@ -24,13 +24,14 @@ class VoiceRepository(private val api: ElfanApi = ElfanApi()) {
      *
      * @param baseUrl Raspberry Pi base URL
      * @param wavFile WAV file to send
+     * @param mode Optional mode, e.g. "push_to_talk" for manual button
      * @return [Result] wrapping [ElfanResult] on success or an exception on failure
      */
-    suspend fun sendVoiceCommand(baseUrl: String, wavFile: File): Result<ElfanResult> =
+    suspend fun sendVoiceCommand(baseUrl: String, wavFile: File, mode: String? = null): Result<ElfanResult> =
         withContext(Dispatchers.IO) {
             try {
-                Log.d(TAG, "Sending voice command to $baseUrl/voice with file: ${wavFile.name}")
-                val response = api.postVoice(baseUrl, wavFile)
+                Log.d(TAG, "Sending voice command to $baseUrl/voice with file: ${wavFile.name}, mode=$mode")
+                val response = api.postVoice(baseUrl, wavFile, mode)
                 Log.d(TAG, "Response: $response")
                 Result.success(mapToElfanResult(response))
             } catch (e: IOException) {
@@ -56,9 +57,11 @@ class VoiceRepository(private val api: ElfanApi = ElfanApi()) {
     // ── Mapping ──────────────────────────────────────────────────────────────
 
     private fun mapToElfanResult(response: VoiceResponse): ElfanResult {
-        val transcription = response.text
-            ?: response.command?.text
+        val transcription = response.text?.trim()
+            ?: response.command?.text?.trim()
             ?: "(no transcription)"
+
+        val hasValidTranscription = transcription.isNotBlank() && transcription != "(no transcription)"
 
         val device = response.command?.device
             ?.replace("_", " ")
@@ -67,7 +70,15 @@ class VoiceRepository(private val api: ElfanApi = ElfanApi()) {
 
         val action = response.command?.action?.uppercase() ?: "-"
         val protocol = response.result?.protocol?.uppercase() ?: "-"
-        val success = response.success && (response.command?.success == true)
+
+        // Periksa keberhasilan eksekusi:
+        // 1. response.success == true
+        // 2. response.command?.success == true
+        // 3. Jika result (device router) ada, pastikan result.success == true
+        // 4. Ada transkripsi yang valid (bukan kosong/noise)
+        val deviceExecutionSuccess = response.result?.success ?: true
+        val commandSuccess = response.command?.success == true
+        val success = response.success && commandSuccess && deviceExecutionSuccess && hasValidTranscription
 
         return ElfanResult(
             transcription = transcription,

@@ -214,8 +214,6 @@ fun SettingsScreen(
 
             // ── Wake Word section ──────────────────────────────────────────────
             val wakeWordEnabled by viewModel.wakeWordEnabled.collectAsState(initial = false)
-            val porcupineKey by viewModel.porcupineAccessKey.collectAsState(initial = "")
-            var keyInput by remember(porcupineKey) { mutableStateOf(porcupineKey) }
 
             SectionCard(title = "Wake Word (Always Listening)") {
                 Row(
@@ -230,7 +228,7 @@ fun SettingsScreen(
                             fontWeight = FontWeight.Medium
                         )
                         Text(
-                            text = "Mendeteksi 'Oke Elfan' di latar belakang",
+                            text = "Mendeteksi 'Oke Elfan' di latar belakang secara lokal",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
                         )
@@ -243,43 +241,31 @@ fun SettingsScreen(
 
                 Spacer(modifier = Modifier.height(12.dp))
 
-                OutlinedTextField(
-                    value = keyInput,
-                    onValueChange = { keyInput = it },
-                    label = { Text("Picovoice Access Key") },
-                    singleLine = true,
+                Card(
                     modifier = Modifier.fillMaxWidth(),
-                    keyboardOptions = KeyboardOptions(
-                        keyboardType = KeyboardType.Password,
-                        imeAction = ImeAction.Done
-                    ),
-                    keyboardActions = KeyboardActions(
-                        onDone = {
-                            viewModel.updatePorcupineAccessKey(keyInput)
-                            focusManager.clearFocus()
-                            scope.launch {
-                                snackbarHostState.showSnackbar("Access Key disimpan")
-                            }
-                        }
-                    ),
-                    trailingIcon = {
-                        IconButton(onClick = {
-                            viewModel.updatePorcupineAccessKey(keyInput)
-                            focusManager.clearFocus()
-                            scope.launch {
-                                snackbarHostState.showSnackbar("Access Key disimpan")
-                            }
-                        }) {
-                            Icon(Icons.Default.Check, contentDescription = "Simpan")
-                        }
+                    colors = CardDefaults.cardColors(
+                        containerColor = MaterialTheme.colorScheme.surface
+                    )
+                ) {
+                    Column(modifier = Modifier.padding(12.dp)) {
+                        Text(
+                            text = "Status Engine: ONNX Runtime (Offline)",
+                            style = MaterialTheme.typography.labelMedium,
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.primary
+                        )
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text(
+                            text = "• Model: oke_elfan.onnx (openWakeWord v2)\n" +
+                                    "• Threshold: 0.85 (Sensitivitas Optimal)\n" +
+                                    "• Privasi: 100% On-Device, tanpa cloud API key\n" +
+                                    "• Audio: PCM 16-bit 16 kHz, buffer 80 ms (1280 samples)",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f),
+                            lineHeight = 18.sp
+                        )
                     }
-                )
-                Text(
-                    text = "Dapatkan Access Key gratis dari console.picovoice.ai",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f),
-                    modifier = Modifier.padding(top = 4.dp, start = 4.dp)
-                )
+                }
             }
 
             // ── About section ──────────────────────────────────────────────────

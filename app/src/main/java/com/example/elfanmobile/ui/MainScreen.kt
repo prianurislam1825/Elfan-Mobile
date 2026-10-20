@@ -129,9 +129,10 @@ fun MainScreen(
             // ── Record button ────────────────────────────────────────────────
             RecordButton(
                 state = state,
+                assistantState = assistantState,
                 onStartRecording = {
                     if (viewModel.hasMicrophonePermission()) {
-                        viewModel.startRecording()
+                        viewModel.startRecording(isPushToTalk = true)
                     } else {
                         onRequestMicPermission()
                     }
@@ -194,31 +195,31 @@ private fun StatusIndicator(
     state: VoiceViewModel.RecordingState,
     assistantState: com.example.elfanmobile.audio.VoiceCommandManager.AssistantState
 ) {
-    val (dotColor, label) = when {
-        assistantState == com.example.elfanmobile.audio.VoiceCommandManager.AssistantState.WAKE_WORD_DETECTED ->
+    val (dotColor, label) = when (assistantState) {
+        com.example.elfanmobile.audio.VoiceCommandManager.AssistantState.WAKE_DETECTED ->
             Pair(Color(0xFFFF9800), "🚨 WAKE WORD TERDETEKSI")
-        assistantState == com.example.elfanmobile.audio.VoiceCommandManager.AssistantState.SPEAKING_RESPONSE ->
-            Pair(Color(0xFF2196F3), "🗣️ ELFAN MERESPONS...")
-        assistantState == com.example.elfanmobile.audio.VoiceCommandManager.AssistantState.LISTENING_COMMAND ||
-        state is VoiceViewModel.RecordingState.Recording ->
-            Pair(Color(0xFFF44336), "🎙 MENDENGARKAN PERINTAH...")
-        assistantState == com.example.elfanmobile.audio.VoiceCommandManager.AssistantState.PROCESSING ||
-        state is VoiceViewModel.RecordingState.Uploading ->
+        com.example.elfanmobile.audio.VoiceCommandManager.AssistantState.SPEAKING_PROMPT ->
+            Pair(Color(0xFF2196F3), "🗣️ ELFAN: \"Ada yang bisa saya bantu?\"")
+        com.example.elfanmobile.audio.VoiceCommandManager.AssistantState.LISTENING_COMMAND ->
+            Pair(Color(0xFFF44336), "🎙️ MENDENGARKAN PERINTAH...")
+        com.example.elfanmobile.audio.VoiceCommandManager.AssistantState.PROCESSING_COMMAND ->
             Pair(Color(0xFFFF9800), "⏳ MEMPROSES KE ELFAN...")
-        state is VoiceViewModel.RecordingState.Success ->
-            Pair(Color(0xFF4CAF50), "✓ SELESAI")
-        state is VoiceViewModel.RecordingState.Error ->
-            Pair(Color(0xFFF44336), "❌ ERROR")
-        assistantState == com.example.elfanmobile.audio.VoiceCommandManager.AssistantState.RETURN_TO_STANDBY ->
+        com.example.elfanmobile.audio.VoiceCommandManager.AssistantState.SPEAKING_RESPONSE ->
+            Pair(Color(0xFF2196F3), "🗣️ ELFAN MENJAWAB...")
+        com.example.elfanmobile.audio.VoiceCommandManager.AssistantState.RECOVERING ->
             Pair(Color(0xFF9E9E9E), "🔄 MENYIAPKAN STANDBY...")
-        else ->
+        com.example.elfanmobile.audio.VoiceCommandManager.AssistantState.STANDBY ->
             Pair(Color(0xFF4CAF50), "● STANDBY (Katakan 'Oke Elfan')")
     }
+
+    val isPulsing = assistantState == com.example.elfanmobile.audio.VoiceCommandManager.AssistantState.LISTENING_COMMAND ||
+            state is VoiceViewModel.RecordingState.Recording ||
+            assistantState == com.example.elfanmobile.audio.VoiceCommandManager.AssistantState.PROCESSING_COMMAND
 
     val infiniteTransition = rememberInfiniteTransition(label = "pulse")
     val scale by infiniteTransition.animateFloat(
         initialValue = 1f,
-        targetValue = if (state is VoiceViewModel.RecordingState.Recording) 1.3f else 1f,
+        targetValue = if (isPulsing) 1.4f else 1f,
         animationSpec = infiniteRepeatable(
             animation = tween(600),
             repeatMode = RepeatMode.Reverse
@@ -255,14 +256,65 @@ private fun StatusIndicator(
 @Composable
 private fun RecordButton(
     state: VoiceViewModel.RecordingState,
+    assistantState: com.example.elfanmobile.audio.VoiceCommandManager.AssistantState,
     onStartRecording: () -> Unit,
     onStopRecording: () -> Unit,
     onReset: () -> Unit
 ) {
-    when (state) {
-        is VoiceViewModel.RecordingState.Idle,
-        is VoiceViewModel.RecordingState.Success,
-        is VoiceViewModel.RecordingState.Error -> {
+    when {
+        assistantState == com.example.elfanmobile.audio.VoiceCommandManager.AssistantState.PROCESSING_COMMAND ||
+        state is VoiceViewModel.RecordingState.Uploading -> {
+            Box(
+                modifier = Modifier.size(180.dp),
+                contentAlignment = Alignment.Center
+            ) {
+                androidx.compose.material3.CircularProgressIndicator(
+                    modifier = Modifier.size(80.dp),
+                    color = MaterialTheme.colorScheme.primary,
+                    strokeWidth = 6.dp
+                )
+                Text(
+                    text = "Memproses...",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 4.dp)
+                )
+            }
+        }
+
+        assistantState == com.example.elfanmobile.audio.VoiceCommandManager.AssistantState.LISTENING_COMMAND ||
+        state is VoiceViewModel.RecordingState.Recording -> {
+            Button(
+                onClick = onStopRecording,
+                modifier = Modifier
+                    .size(180.dp)
+                    .border(3.dp, Color(0xFFF44336).copy(alpha = 0.4f), CircleShape),
+                shape = CircleShape,
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = Color(0xFFFFEBEE)
+                )
+            ) {
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    Icon(
+                        Icons.Default.Stop,
+                        contentDescription = null,
+                        modifier = Modifier.size(48.dp),
+                        tint = Color(0xFFF44336)
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Text(
+                        text = "SELESAI",
+                        textAlign = TextAlign.Center,
+                        color = Color(0xFFF44336),
+                        fontWeight = FontWeight.Bold,
+                        letterSpacing = 1.sp,
+                        fontSize = 14.sp
+                    )
+                }
+            }
+        }
+
+        else -> {
             Button(
                 onClick = {
                     if (state is VoiceViewModel.RecordingState.Success ||
@@ -294,9 +346,12 @@ private fun RecordButton(
                     )
                     Spacer(modifier = Modifier.height(8.dp))
                     Text(
-                        text = if (state is VoiceViewModel.RecordingState.Success ||
-                            state is VoiceViewModel.RecordingState.Error
-                        ) "COBA LAGI" else "MULAI\nBICARA",
+                        text = when (assistantState) {
+                            com.example.elfanmobile.audio.VoiceCommandManager.AssistantState.SPEAKING_PROMPT,
+                            com.example.elfanmobile.audio.VoiceCommandManager.AssistantState.SPEAKING_RESPONSE -> "ELFAN\nBICARA"
+                            com.example.elfanmobile.audio.VoiceCommandManager.AssistantState.RECOVERING -> "STANDBY..."
+                            else -> "MULAI\nBICARA"
+                        },
                         textAlign = TextAlign.Center,
                         color = MaterialTheme.colorScheme.onPrimaryContainer,
                         fontWeight = FontWeight.Bold,
@@ -304,56 +359,6 @@ private fun RecordButton(
                         fontSize = 14.sp
                     )
                 }
-            }
-        }
-
-        is VoiceViewModel.RecordingState.Recording -> {
-            Button(
-                onClick = onStopRecording,
-                modifier = Modifier
-                    .size(180.dp)
-                    .border(3.dp, Color(0xFFF44336).copy(alpha = 0.4f), CircleShape),
-                shape = CircleShape,
-                colors = ButtonDefaults.buttonColors(
-                    containerColor = Color(0xFFFFEBEE)
-                )
-            ) {
-                Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                    Icon(
-                        Icons.Default.Stop,
-                        contentDescription = null,
-                        modifier = Modifier.size(48.dp),
-                        tint = Color(0xFFF44336)
-                    )
-                    Spacer(modifier = Modifier.height(8.dp))
-                    Text(
-                        text = "SELESAI",
-                        textAlign = TextAlign.Center,
-                        color = Color(0xFFF44336),
-                        fontWeight = FontWeight.Bold,
-                        letterSpacing = 1.sp,
-                        fontSize = 14.sp
-                    )
-                }
-            }
-        }
-
-        is VoiceViewModel.RecordingState.Uploading -> {
-            Box(
-                modifier = Modifier.size(180.dp),
-                contentAlignment = Alignment.Center
-            ) {
-                androidx.compose.material3.CircularProgressIndicator(
-                    modifier = Modifier.size(80.dp),
-                    color = MaterialTheme.colorScheme.primary,
-                    strokeWidth = 6.dp
-                )
-                Text(
-                    text = "Mengirim...",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.primary,
-                    modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 4.dp)
-                )
             }
         }
     }
@@ -397,8 +402,11 @@ private fun ResultCard(state: VoiceViewModel.RecordingState) {
 
                 is VoiceViewModel.RecordingState.Success -> {
                     val r = state.result
-                    val statusText = if (r.success) "✓ Command berhasil" else "⚠ Command gagal"
-                    ResultRow(label = "Status", value = statusText, highlight = r.success)
+                    val statusText = if (r.success) "✓ Command berhasil" else {
+                        val reason = r.rawResponse.error ?: r.rawResponse.message ?: "Perintah tidak dikenali"
+                        "⚠ Command gagal: $reason"
+                    }
+                    ResultRow(label = "Status", value = statusText, highlight = r.success, isError = !r.success)
                     ResultRow(label = "Transkripsi", value = r.transcription)
                     ResultRow(label = "Device", value = r.device)
                     ResultRow(label = "Action", value = r.action)

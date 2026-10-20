@@ -37,17 +37,22 @@ class ElfanApi {
      * @throws Exception on HTTP errors or parse failures
      */
     @Throws(IOException::class, Exception::class)
-    fun postVoice(baseUrl: String, wavFile: File): VoiceResponse {
+    fun postVoice(baseUrl: String, wavFile: File, mode: String? = null): VoiceResponse {
         val url = normalizeBaseUrl(baseUrl) + "/voice"
 
-        val requestBody = MultipartBody.Builder()
+        val builder = MultipartBody.Builder()
             .setType(MultipartBody.FORM)
             .addFormDataPart(
                 name = "audio",
                 filename = wavFile.name,
                 body = wavFile.asRequestBody("audio/wav".toMediaTypeOrNull())
             )
-            .build()
+
+        if (!mode.isNullOrBlank()) {
+            builder.addFormDataPart("mode", mode)
+        }
+
+        val requestBody = builder.build()
 
         val request = Request.Builder()
             .url(url)
