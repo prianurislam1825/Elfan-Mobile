@@ -250,7 +250,7 @@ class OnnxWakeWordDetector(private val context: Context) {
         try { melspecSession?.close() } catch (_: Exception) {}
         try { embeddingSession?.close() } catch (_: Exception) {}
         try { classifierSession?.close() } catch (_: Exception) {}
-        try { ortEnv?.close() } catch (_: Exception) {}
+        // OrtEnvironment sengaja tidak di-close
         melspecSession = null
         embeddingSession = null
         classifierSession = null

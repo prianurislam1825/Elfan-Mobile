@@ -34,11 +34,20 @@ import java.nio.ByteOrder
  *   caused silent (-91 dB) recordings.
  * - AudioRecord state is fully logged for diagnostics.
  */
-class WavRecorder(private val context: Context) {
+class WavRecorder(private val context: Context) : AudioRecorder {
 
     companion object {
         private const val TAG = "WavRecorder"
         const val SAMPLE_RATE = 16000
+
+        /**
+         * Typealias agar referensi lama seperti `WavRecorder.StopReason` dan
+         * `WavRecorder.AudioDiagnostic` tetap valid setelah tipe dipindahkan ke
+         * [AudioTypes] untuk kebutuhan [AudioRecorder].
+         */
+        typealias StopReason = com.example.elfanmobile.audio.StopReason
+        typealias AudioDiagnostic = com.example.elfanmobile.audio.AudioDiagnostic
+
         private const val CHANNEL_CONFIG = AudioFormat.CHANNEL_IN_MONO
         private const val AUDIO_FORMAT = AudioFormat.ENCODING_PCM_16BIT
         private const val OUTPUT_FILE_NAME = "elfan_record.wav"
@@ -53,56 +62,19 @@ class WavRecorder(private val context: Context) {
         private const val WAV_HEADER_SIZE = 44
     }
 
-    /**
-     * Diagnostic stats collected from the last recording session.
-     * Exposed so the UI can display them without ADB/Logcat.
-     */
-    data class AudioDiagnostic(
-        val totalBytesRead: Long,
-        val totalSamples: Long,
-        val nonZeroSamples: Long,
-        val peak: Int,        // max absolute amplitude (0–32767)
-        val minSample: Int,   // most negative signed sample
-        val maxSample: Int,   // most positive signed sample
-        val allZero: Boolean, // true = entire recording is silence
-        val readCount: Int,   // how many times AudioRecord.read() was called
-        val durationSeconds: Float
-    ) {
-        /** Human-readable summary for display in UI */
-        fun toDisplayString(): String = buildString {
-            appendLine("═══ AUDIO DIAGNOSTIC ═══")
-            appendLine("totalBytes   : $totalBytesRead B")
-            appendLine("readCount    : $readCount")
-            appendLine("totalSamples : $totalSamples")
-            appendLine("nonZero      : $nonZeroSamples")
-            appendLine("peak         : $peak")
-            appendLine("min          : $minSample")
-            appendLine("max          : $maxSample")
-            appendLine("allZero      : $allZero")
-            append(    "duration     : ${"%.2f".format(durationSeconds)} s")
-        }
-    }
-
     private var audioRecord: AudioRecord? = null
     @Volatile private var isRecording = false
     private var outputFile: File? = null
 
     /** Diagnostic from the most recent recording. Null if no recording has finished. */
-    var lastDiagnostic: AudioDiagnostic? = null
+    override var lastDiagnostic: AudioDiagnostic? = null
         private set
 
     /** Duration of the last recording in seconds. */
-    var lastRecordingDurationSeconds: Float = 0f
+    override var lastRecordingDurationSeconds: Float = 0f
         private set
 
     // ── VAD Configuration (End-of-Speech & Speech Detection) ────────────────
-    enum class StopReason {
-        MANUAL_STOP,
-        END_OF_SPEECH,
-        INITIAL_TIMEOUT,
-        MAX_DURATION,
-        ERROR
-    }
 
     var vadEnabled: Boolean = true
     var speechRmsThreshold: Int = 450 // RMS di atas ini dianggap sebagai suara/bicara normal
@@ -113,19 +85,19 @@ class WavRecorder(private val context: Context) {
     var maxTotalRecordingDurationMs: Long = 20000L // Batas pengaman rekaman maksimal (20 detik)
 
     /** Menandakan apakah ada suara pengguna yang terdeteksi selama sesi rekaman ini */
-    var hasSpeechDetected: Boolean = false
+    override var hasSpeechDetected: Boolean = false
         private set
 
     /** Alasan mengapa rekaman terakhir berhenti */
-    var lastStopReason: StopReason = StopReason.MANUAL_STOP
+    override var lastStopReason: StopReason = StopReason.MANUAL_STOP
         private set
 
     /** The output WAV file from the last recording. */
-    val wavFile: File?
+    override val wavFile: File?
         get() = outputFile
 
     /** Check if microphone permission is granted. */
-    fun hasMicrophonePermission(): Boolean {
+    override fun hasMicrophonePermission(): Boolean {
         return ContextCompat.checkSelfPermission(
             context,
             Manifest.permission.RECORD_AUDIO
@@ -138,7 +110,7 @@ class WavRecorder(private val context: Context) {
      *
      * @return the output File if successful, null if permission denied or error
      */
-    suspend fun startRecording(): File? = withContext(Dispatchers.IO) {
+    override suspend fun startRecording(): File? = withContext(Dispatchers.IO) {
         // ── 1. Permission check ──────────────────────────────────────────────
         if (!hasMicrophonePermission()) {
             Log.e(TAG, "❌ RECORD_AUDIO permission not granted")
@@ -416,7 +388,7 @@ class WavRecorder(private val context: Context) {
     }
 
     /** Stop an ongoing recording. */
-    fun stopRecording() {
+    override fun stopRecording() {
         lastStopReason = StopReason.MANUAL_STOP
         isRecording = false
         Log.d(TAG, "stopRecording() called — isRecording set to false")

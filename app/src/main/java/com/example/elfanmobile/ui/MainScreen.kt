@@ -56,6 +56,8 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.example.elfanmobile.audio.AudioDiagnostic
+import com.example.elfanmobile.audio.StopReason
 import com.example.elfanmobile.viewmodel.VoiceViewModel
 
 /**
@@ -519,7 +521,7 @@ private fun DebugCard(state: VoiceViewModel.RecordingState, duration: Float) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 @Composable
-private fun AudioDiagnosticCard(diagnostic: com.example.elfanmobile.audio.WavRecorder.AudioDiagnostic) {
+private fun AudioDiagnosticCard(diagnostic: AudioDiagnostic) {
     Card(
         modifier = Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(12.dp),

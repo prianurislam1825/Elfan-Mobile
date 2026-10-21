@@ -6,6 +6,7 @@ import android.app.NotificationManager
 import android.app.Service
 import android.content.Context
 import android.content.Intent
+import android.content.pm.ServiceInfo
 import android.media.AudioFormat
 import android.media.AudioRecord
 import android.media.MediaRecorder
@@ -18,13 +19,16 @@ import android.util.Log
 import android.widget.Toast
 import androidx.core.app.NotificationCompat
 import com.example.elfanmobile.R
+import com.example.elfanmobile.repository.SettingsRepository
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 
 /**
  * OnnxWakeWordService
@@ -104,10 +108,42 @@ class OnnxWakeWordService : Service() {
             ACTION_START -> {
                 val threshold = intent.getFloatExtra(EXTRA_THRESHOLD, OnnxWakeWordDetector.DEFAULT_THRESHOLD)
                 startOnnxWakeWord(threshold)
+                return START_STICKY
             }
-            ACTION_STOP -> stopSelf()
+            ACTION_STOP -> {
+                stopSelf()
+                return START_NOT_STICKY
+            }
+            null -> {
+                // SVC-1: Penanganan aman untuk START_STICKY restart pada Android 12+
+                // Jangan memanggil startForeground berulang atau membuka mikrofon dua kali.
+                // Periksa preferensi wake word; jika aktif mulai ulang dengan aman, jika tidak hentikan service.
+                scope.launch {
+                    try {
+                        val settings = SettingsRepository(applicationContext)
+                        val enabled = withTimeoutOrNull(1000L) { settings.wakeWordEnabled.first() } ?: false
+                        if (!enabled) {
+                            Log.w(TAG, "Restart tanpa intent: wake word dinonaktifkan, menghentikan service")
+                            stopSelf()
+                            return@launch
+                        }
+                        if (isServiceRunning && (detector != null && detector?.isInitialized == true) && isListening) {
+                            Log.d(TAG, "Restart tanpa intent: service sudah berjalan dengan benar")
+                            return@launch
+                        }
+                        startOnnxWakeWord(OnnxWakeWordDetector.DEFAULT_THRESHOLD)
+                    } catch (e: Exception) {
+                        Log.e(TAG, "Gagal menangani restart tanpa intent", e)
+                        stopSelf()
+                    }
+                }
+                return START_STICKY
+            }
+            else -> {
+                // Action tidak dikenal; pertahankan perilaku aman tanpa memulai ulang ganda
+                return START_STICKY
+            }
         }
-        return START_STICKY
     }
 
     override fun onDestroy() {
@@ -137,12 +173,31 @@ class OnnxWakeWordService : Service() {
     // ── Inisialisasi ───────────────────────────────────────────────────────────
 
     private fun startOnnxWakeWord(threshold: Float) {
+        if (detector?.isInitialized == true && isListening && audioRecord != null) {
+            Log.d(TAG, "startOnnxWakeWord: sudah berjalan, mengabaikan pemanggilan ganda")
+            return
+        }
+
+        // Hindari pemanggilan startForeground berulang jika sudah foreground
         val notification = createNotification("Memuat model wake word ONNX...")
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-            startForeground(NOTIFICATION_ID, notification,
-                android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE)
-        } else {
-            startForeground(NOTIFICATION_ID, notification)
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE)
+            } else {
+                startForeground(NOTIFICATION_ID, notification)
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "startForeground gagal atau sudah aktif: ${e.message}")
+        }
+
+        if (detector?.isInitialized == true) {
+            val det = detector
+            if (det != null) {
+                updateNotification("Siap! Ucapkan 'Oke Elfan'")
+                showToast("ELFAN ONNX siap mendengarkan")
+                startAudioLoop(det)
+                return
+            }
         }
 
         scope.launch {

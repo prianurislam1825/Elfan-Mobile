@@ -4,6 +4,9 @@ import android.content.Context
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
+import com.example.elfanmobile.audio.AudioDiagnostic
+import com.example.elfanmobile.audio.AudioRecorder
+import com.example.elfanmobile.audio.StopReason
 import com.example.elfanmobile.audio.VoiceCommandManager
 import com.example.elfanmobile.audio.VoiceCommandManager.AssistantState
 import com.example.elfanmobile.audio.WavRecorder
@@ -32,7 +35,8 @@ import java.net.SocketTimeoutException
 class VoiceViewModel(
     private val appContext: Context,
     private val settingsRepository: SettingsRepository,
-    private val voiceRepository: VoiceRepository = VoiceRepository()
+    private val voiceRepository: VoiceRepository = VoiceRepository(),
+    private val wavRecorder: AudioRecorder = WavRecorder(appContext)
 ) : ViewModel() {
 
     // ── Recording state ───────────────────────────────────────────────────────
@@ -48,14 +52,21 @@ class VoiceViewModel(
     private val _recordingState = MutableStateFlow<RecordingState>(RecordingState.Idle)
     val recordingState: StateFlow<RecordingState> = _recordingState.asStateFlow()
 
+    /**
+     * Hanya untuk pengujian unit. Tidak digunakan di produksi.
+     */
+    internal fun setRecordingStateForTest(state: RecordingState) {
+        _recordingState.value = state
+    }
+
     private val _recordingDuration = MutableStateFlow(0f)
     val recordingDuration: StateFlow<Float> = _recordingDuration.asStateFlow()
 
     private val _lastWavFile = MutableStateFlow<File?>(null)
     val lastWavFile: StateFlow<File?> = _lastWavFile.asStateFlow()
 
-    private val _audioDiagnostic = MutableStateFlow<com.example.elfanmobile.audio.WavRecorder.AudioDiagnostic?>(null)
-    val audioDiagnostic: StateFlow<com.example.elfanmobile.audio.WavRecorder.AudioDiagnostic?> = _audioDiagnostic.asStateFlow()
+    private val _audioDiagnostic = MutableStateFlow<AudioDiagnostic?>(null)
+    val audioDiagnostic: StateFlow<AudioDiagnostic?> = _audioDiagnostic.asStateFlow()
 
     // ── Settings ──────────────────────────────────────────────────────────────
 
@@ -66,7 +77,6 @@ class VoiceViewModel(
 
     // ── Internals ─────────────────────────────────────────────────────────────
 
-    private val wavRecorder = WavRecorder(appContext)
     private var recordingJob: Job? = null
     private var isCurrentSessionPushToTalk = false
 
@@ -74,7 +84,14 @@ class VoiceViewModel(
         viewModelScope.launch {
             VoiceCommandManager.state.collect { state ->
                 if (state == AssistantState.LISTENING_COMMAND) {
-                    if (_recordingState.value is RecordingState.Idle) {
+                    // WW-1 fix: wake word harus dapat memicu perekaman berulang kali.
+                    // Sebelumnya hanya state Idle yang diizinkan, sehingga sesi kedua
+                    // macet permanen setelah sesi pertama berakhir Success/Error.
+                    // Sesi lama yang sudah selesai direset ke Idle, lalu rekam ulang.
+                    if (_recordingState.value !is RecordingState.Recording &&
+                        _recordingState.value !is RecordingState.Uploading
+                    ) {
+                        _recordingState.value = RecordingState.Idle
                         startRecording(isPushToTalk = false)
                     }
                 }
@@ -110,7 +127,7 @@ class VoiceViewModel(
             // Capture diagnostic immediately after recording ends
             _audioDiagnostic.value = wavRecorder.lastDiagnostic
 
-            if (wavRecorder.lastStopReason == WavRecorder.StopReason.INITIAL_TIMEOUT || !wavRecorder.hasSpeechDetected) {
+            if (wavRecorder.lastStopReason == StopReason.INITIAL_TIMEOUT || !wavRecorder.hasSpeechDetected) {
                 val msg = "Tidak ada suara terdeteksi."
                 _recordingState.value = RecordingState.Error(msg)
                 speakAndReturnToStandby(msg)

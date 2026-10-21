@@ -28,7 +28,7 @@ class SettingsRepository(private val context: Context) {
         val KEY_WAKE_WORD_ENABLED = booleanPreferencesKey("wake_word_enabled")
         val KEY_PORCUPINE_ACCESS_KEY = stringPreferencesKey("porcupine_access_key")
 
-        const val DEFAULT_RASPBERRY_PI_URL = "http://192.168.20.126:5001"
+        const val DEFAULT_RASPBERRY_PI_URL = "http://192.168.20.137:5001"
     }
 
     /** Observe the Raspberry Pi base URL. Emits [DEFAULT_RASPBERRY_PI_URL] if not set. */
